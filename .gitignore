@@ -1,0 +1,8 @@
+terraform/bootstrap/.terraform/
+terraform/bootstrap/*.tfstate*
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+tfplan
+.DS_Store

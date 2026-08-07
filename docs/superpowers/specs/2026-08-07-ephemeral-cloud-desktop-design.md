@@ -42,9 +42,9 @@ The second goal is served by the first. A project the author actually uses gets 
 
 ```
       ┌──────── PERSISTENT — always exists, costs pennies ───────────┐
-      │  S3 bucket: terraform remote state                          │
-      │  DynamoDB table: state locking                              │
-      │  S3 bucket: desktop data (profile, configs, downloads)      │
+      │  S3 bucket: terraform remote state (native lockfile)         │
+      │  S3 bucket: desktop data (profile, configs, downloads)       │
+      │  IAM: GitHub OIDC provider + CI role (no static keys)        │
       └─────────────────────────────────────────────────────────────┘
                                 ▲
                 restore on boot │ sync on stop / interruption / manual
@@ -80,7 +80,9 @@ The second goal is served by the first. A project the author actually uses gets 
 
 **Non-burstable instance family.** `t3.large` is cheaper but burstable: sustained video encoding exhausts CPU credits and the desktop degrades mid-session. Dedicated vCPU is a requirement, not a preference. `c7i.large` (2 vCPU / 4 GB) is too small to run a desktop and encode simultaneously.
 
-**Remote state from the first commit.** CI has no local state file, so S3 + DynamoDB is structurally required rather than aspirational.
+**Region: `me-central-1` (UAE).** Latency is the dominant factor in how a remote desktop *feels*, and the operator is in Abu Dhabi — roughly 5–15ms to the UAE region against ~110–130ms to Frankfurt. Measured spot pricing also favours it ($0.0878 vs $0.1043/hr for `c7i.xlarge`), so it is cheaper *and* faster. This deliberately diverges from the existing VPN project's `eu-central-1`, which was chosen for a workload where a 100ms difference is irrelevant. Region should follow the workload, not precedent.
+
+**Remote state from the first commit, with S3 native locking.** CI has no local state file, so remote state is structurally required rather than aspirational. Locking uses the S3 backend's `use_lockfile` rather than a DynamoDB table — DynamoDB-based locking is the legacy pattern and is deprecated in current Terraform. One fewer resource, one fewer thing to bill.
 
 **Tailscale for access; security group closed.** WebRTC media travels over UDP and therefore cannot traverse a Cloudflare Tunnel, which is HTTP-only. Rather than expose a full desktop to the internet behind a password, the instance joins the author's existing tailnet and the security group permits no inbound internet traffic at all. Zero internet-facing attack surface.
 
@@ -109,7 +111,7 @@ Workflow in practice: `apt install` what you need to use it now; the Dockerfile 
 
 | Path | Responsibility |
 |---|---|
-| `terraform/bootstrap/` | State bucket, lock table, data bucket. Applied once. Local state, gitignored. |
+| `terraform/bootstrap/` | State bucket, data bucket, GitHub OIDC provider and CI role. Applied once. Local state, gitignored. |
 | `terraform/` | The ephemeral stack: VPC, subnet, IGW, route table, SG, IAM, spot instance. No DNS provider needed. |
 | `terraform/user-data.sh.tpl` | Provisions Docker, AWS CLI, Tailscale; pulls the image; restores data; starts neko; installs save handlers. |
 | `image/Dockerfile` | Extends `m1k1o/neko:xfce`, installs `packages.txt`, bakes the package baseline. |
@@ -180,12 +182,12 @@ Security group: **no inbound rules whatsoever.** Both the UI and media arrive th
 
 ## Cost model
 
-Measured spot pricing, eu-central-1, 2026-08-07:
+Measured spot pricing, `me-central-1`, 2026-08-07:
 
 | State | Cost |
 |---|---|
-| Running, `c7i.xlarge` spot | ~$0.10/hr |
-| 2 hr/day × 20 days | ~$4.03/month |
+| Running, `c7i.xlarge` spot | ~$0.0878/hr |
+| 2 hr/day × 20 days | ~$3.51/month |
 | Destroyed | ~$0.12/month (S3 storage only) |
 
 Compare a NAT Gateway ($32/mo) or an Elastic IP ($3.65/mo idle), both deliberately avoided.

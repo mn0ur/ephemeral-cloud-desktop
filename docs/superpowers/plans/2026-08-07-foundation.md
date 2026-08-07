@@ -779,9 +779,15 @@ gh variable list
 ```
 Expected: both variables listed. These are **variables, not secrets** — a role ARN is not sensitive, and pretending it is makes debugging harder.
 
-- [ ] **Step 7: Commit, push, and run the check**
+- [ ] **Step 7: Commit on a branch and merge through a pull request**
+
+`main` is protected as of Task 3. Although the repository owner could bypass it (`enforce_admins: false`), pushing credentials configuration straight to `main` would skip the very gate this project exists to demonstrate. Use the PR flow.
+
+There is also a mechanical reason: a `workflow_dispatch` workflow is only dispatchable once it exists **on the default branch**, so `gh workflow run` cannot work until this is merged.
 
 ```bash
+cd /c/Users/MN/Documents/Code/ephemeral-cloud-desktop
+git checkout -b oidc
 git add terraform/bootstrap .github/workflows/oidc-check.yml
 git -c user.name="Mohamed Nour" -c user.email="mnuowr@gmail.com" \
   commit -m "feat: GitHub OIDC provider and CI role
@@ -790,11 +796,22 @@ CI assumes a role with a per-run short-lived token. No static AWS
 access key exists anywhere in this project. Trust policy is scoped to
 this repository only - without the sub condition any repo on GitHub
 could assume it."
-git push
+git push -u origin oidc
+gh pr create --fill --base main
+gh pr checks --watch
+```
+Expected: all five checks pass.
+
+- [ ] **Step 7b: Merge, then dispatch the check**
+
+```bash
+gh pr merge --squash --delete-branch
+git checkout main && git pull
 gh workflow run "OIDC check"
-sleep 20
+sleep 25
 gh run list --workflow="OIDC check" --limit 1
 ```
+Expected: a run listed with status `completed` and conclusion `success`.
 
 - [ ] **Step 8: Verify the assumed identity is the CI role, not a user**
 

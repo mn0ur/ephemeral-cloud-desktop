@@ -251,6 +251,8 @@ __HOSTNAME__ {
 		mnour __HASH__
 	}
 
+	redir /control /control/ 308
+
 	handle_path /control* {
 		reverse_proxy 127.0.0.1:8000
 	}

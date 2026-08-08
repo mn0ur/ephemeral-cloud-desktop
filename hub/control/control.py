@@ -101,6 +101,10 @@ def latest_run():
 PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- Without this, visiting /control (no trailing slash) makes every
+     relative fetch resolve to /api/... instead of /control/api/...,
+     which 404s silently and freezes the UI mid-action. -->
+<base href="/control/">
 <title>Desktop Control</title>
 <style>
  :root{color-scheme:dark}
@@ -146,7 +150,7 @@ PAGE = """<!doctype html>
   <div id="bar" class="bar"><div id="fill" class="fill"></div></div>
   <div id="note" class="note"></div>
 
-  <a id="open" class="open" href="/">Open desktop &rarr;</a>
+  <a id="open" class="open" href="https://desktop.mnour.sd">Open desktop &rarr;</a>
 
   <div class="row">
     <button id="start" class="go">Start desktop</button>
@@ -202,7 +206,14 @@ async function poll(){
     if(busy==='start'&&s.desktop_up){busy=null;location.href='https://desktop.mnour.sd'}
     if(busy==='destroy'&&!s.desktop_up&&s.run&&s.run.status==='completed'){busy=null}
     render(s);
-  }catch(e){$('err').textContent=e.message}
+  }catch(e){
+    // A poll that dies must not leave the UI stuck mid-action.
+    busy=null;
+    $('err').textContent='status unreachable: '+e.message;
+    $('dot').className='dot'; $('txt').textContent='status unknown';
+    $('start').disabled=$('destroy').disabled=false;
+    $('bar').classList.remove('on');
+  }
 }
 
 async function go(action){

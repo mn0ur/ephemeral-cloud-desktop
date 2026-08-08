@@ -79,9 +79,16 @@ variable "enable_ssh" {
 }
 
 variable "ssh_public_key_path" {
-  description = "Existing public key to import. Only the PUBLIC half is read, so no private key material enters Terraform state."
+  description = <<-EOT
+    Public key to import for SSH access.
+
+    Committed into the repo rather than read from ~/.ssh, because reading a
+    file from one particular laptop makes the configuration unrunnable
+    anywhere else - CI failed on exactly this. A PUBLIC key is safe to commit;
+    GitHub already publishes yours at github.com/mn0ur.keys.
+  EOT
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
+  default     = "keys/mnour.pub"
 }
 
 variable "screen" {

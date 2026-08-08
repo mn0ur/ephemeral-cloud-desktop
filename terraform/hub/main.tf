@@ -75,7 +75,7 @@ variable "cloudflare_zone" {
 variable "ssh_public_key_path" {
   description = "Public half only - never enters state."
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
+  default     = "../keys/mnour.pub"
 }
 
 variable "tailscale_auth_key" {
@@ -225,7 +225,7 @@ resource "random_password" "dashboard" {
 
 resource "aws_key_pair" "hub" {
   key_name   = "${var.name}-key"
-  public_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
+  public_key = trimspace(file("${path.module}/${var.ssh_public_key_path}"))
 }
 
 data "aws_ami" "ubuntu_arm" {

@@ -237,7 +237,7 @@ resource "aws_key_pair" "desktop" {
   count = var.enable_ssh ? 1 : 0
 
   key_name   = "${local.name}-key"
-  public_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
+  public_key = trimspace(file("${path.module}/${var.ssh_public_key_path}"))
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ssh" {

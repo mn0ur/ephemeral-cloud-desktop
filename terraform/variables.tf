@@ -113,6 +113,19 @@ variable "timezone" {
   default = "Asia/Dubai"
 }
 
+variable "fresh" {
+  description = <<-EOT
+    Start from a clean desktop instead of resuming.
+
+    false (default) resumes the existing container from the persistent volume,
+    keeping every package installed inside it. true DELETES that container and
+    builds a new one - a deliberate reset, and irreversible for anything that
+    lived outside /config.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "web_user" {
   description = "Basic auth username. NOTE: upstream states basic auth alone is inadequate for internet exposure - Cloudflare Access should front this."
   type        = string

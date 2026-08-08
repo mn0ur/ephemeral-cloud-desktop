@@ -275,7 +275,7 @@ resource "aws_instance" "desktop" {
     web_password = random_password.admin.result
     encoder      = var.encoder
     framerate    = var.framerate
-    data_device  = "/dev/sdf"
+    fresh        = var.fresh ? "true" : "false"
   })
 
   root_block_device {

@@ -131,3 +131,16 @@ variable "web_user" {
   type        = string
   default     = "mnour"
 }
+
+variable "web_password_override" {
+  description = <<-EOT
+    Set the desktop password explicitly instead of generating one.
+
+    Empty (default) keeps the random_password, which is the better habit - a
+    generated 32-character secret beats anything typed by hand. This exists so
+    a desktop can be handed to someone else with credentials you choose.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}

@@ -26,6 +26,6 @@ output "user_password" {
 
 output "admin_password" {
   description = "neko admin password."
-  value       = random_password.admin.result
+  value       = local.web_password
   sensitive   = true
 }

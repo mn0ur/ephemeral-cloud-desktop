@@ -1,0 +1,76 @@
+name: Desktop - DESTROY
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY to confirm'
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-lifecycle
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    name: terraform destroy
+    runs-on: ubuntu-latest
+    steps:
+      # A typed confirmation, because this is one click away from tearing down
+      # a running machine someone might be working in.
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "DESTROY" ]; then
+            echo "::error::Confirmation failed. Type DESTROY exactly."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.7
+
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::AWS secrets are not set. See Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
+
+      # Only the desktop stack. The persistent volume lives in
+      # terraform/persistent and the monitoring box in terraform/hub - neither
+      # is touched here, which is the entire reason they are separate stacks.
+      - name: terraform destroy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          terraform -chdir=terraform init -input=false
+          terraform -chdir=terraform destroy -auto-approve -input=false
+
+      - name: Confirm nothing billable is left
+        run: |
+          RUNNING=$(aws ec2 describe-instances --region eu-central-1 \
+            --filters "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=running,pending" \
+            --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo "?")
+          {
+            echo "## Desktop destroyed"
+            echo ""
+            echo "Desktop instances still running: **$RUNNING**"
+            echo ""
+            echo "Your data is safe - the 20GB volume is in a separate stack and"
+            echo "was not touched. The next START restores the browser profile and"
+            echo "every package installed inside the desktop."
+            echo ""
+            echo "Remaining cost: ~\$0.80/month for the volume."
+          } >> "$GITHUB_STEP_SUMMARY"

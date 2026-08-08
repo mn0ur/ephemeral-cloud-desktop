@@ -13,6 +13,11 @@ locals {
   # Display name for tags only. local.name still builds security group, key
   # pair and IAM names - renaming those would force replacements.
   display = "mnour-desktop"
+
+  # Explicit password when supplied, generated otherwise. Lets a desktop be
+  # handed to someone else with credentials you choose, without weakening the
+  # default - which stays a generated 32-character secret.
+  web_password = var.web_password_override != "" ? var.web_password_override : random_password.admin.result
 }
 
 # The persistent /config volume, created by the terraform/persistent stack and
@@ -279,7 +284,7 @@ resource "aws_instance" "desktop" {
     image        = var.image
     timezone     = var.timezone
     web_user     = var.web_user
-    web_password = random_password.admin.result
+    web_password = local.web_password
     encoder      = var.encoder
     framerate    = var.framerate
     fresh        = var.fresh ? "true" : "false"

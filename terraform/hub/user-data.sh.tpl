@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hub: Uptime Kuma + Homepage behind Caddy.
+# Hub: Uptime Kuma + Homepage + the desktop control panel, behind Caddy.
 #
 # This box exists because the home lab's Uptime Kuma runs ON the Pi it
 # monitors - so when the Pi died it took the alerting with it, and a 17-day
@@ -16,7 +16,7 @@ PERSIST="/mnt/hubdata"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y ca-certificates curl gnupg jq apache2-utils \
+apt-get install -y ca-certificates curl gnupg jq apache2-utils python3 \
   debian-keyring debian-archive-keyring apt-transport-https
 apt-get install -y --no-install-recommends docker.io docker-compose-v2
 
@@ -62,7 +62,7 @@ if ! findmnt -n "$PERSIST" >/dev/null 2>&1; then
 fi
 echo "verified: $PERSIST on $(findmnt -no SOURCE "$PERSIST")"
 
-mkdir -p "$PERSIST/uptime-kuma" "$PERSIST/homepage/config"
+mkdir -p "$PERSIST/uptime-kuma" "$PERSIST/homepage/config" /opt/hub
 systemctl enable --now docker
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ systemctl enable --now docker
 # ---------------------------------------------------------------------------
 if [ -n "$TS_KEY" ]; then
   curl -fsSL https://tailscale.com/install.sh | sh
-  tailscale up --authkey "$TS_KEY" --hostname=hub --accept-routes --ssh || \
+  tailscale up --authkey "$TS_KEY" --hostname=mnour-hub --accept-routes --ssh || \
     echo "WARNING: tailscale up failed - home lab monitoring unavailable"
   echo "tailscale: $(tailscale ip -4 2>/dev/null || echo 'not connected')"
 else
@@ -87,49 +87,58 @@ theme: dark
 color: slate
 headerStyle: clean
 layout:
-  Cloud Desktop:
+  Desktop:
     style: row
-    columns: 2
+    columns: 3
   Home Lab:
     style: row
     columns: 3
   Public:
     style: row
-    columns: 3
+    columns: 4
 YAML
 
 cat >"$PERSIST/homepage/config/services.yaml" <<'YAML'
-- Cloud Desktop:
-    - Desktop:
+- Desktop:
+    - Control Panel:
+        href: /control/
+        description: Start / destroy with live progress, then auto-open the desktop
+    - Desktop STATUS:
         href: https://desktop.mnour.sd
-        description: KDE Plasma - webtop/Selkies. Ephemeral.
-        siteMonitor: https://desktop.mnour.sd
-    - Start / Destroy:
+        description: Green = running. Red = destroyed, costing nothing.
+        siteMonitor: https://desktop.mnour.sd/healthz
+        statusStyle: dot
+    - Workflows:
         href: https://github.com/mn0ur/ephemeral-cloud-desktop/actions
-        description: GitHub Actions - run the up/down workflows
 
 - Home Lab:
     - Proxmox:
         href: https://192.168.1.222:8006
-        description: Pi 5 hypervisor
+        description: Pi 5 hypervisor - needs Tailscale on this hub
         siteMonitor: https://192.168.1.222:8006
-    - Uptime Kuma (local):
-        href: http://192.168.1.226:3001
-        description: The Pi's own monitor - dies with the Pi
+        statusStyle: dot
     - Nextcloud:
         href: http://192.168.1.224
         siteMonitor: http://192.168.1.224
+        statusStyle: dot
+    - Uptime Kuma (Pi):
+        href: http://192.168.1.226:3001
+        description: The Pi's own monitor - dies with the Pi
 
 - Public:
     - Whasal:
         href: https://whasal.com
-        description: WhatsApp ordering SaaS
         siteMonitor: https://whasal.com
+        statusStyle: dot
     - Portfolio:
         href: https://mnour.sd
         siteMonitor: https://mnour.sd
-    - GitHub:
-        href: https://github.com/mn0ur
+        statusStyle: dot
+    - Uptime Kuma (here):
+        href: /kuma/
+        description: External monitoring - survives the Pi going down
+    - Repo:
+        href: https://github.com/mn0ur/ephemeral-cloud-desktop
 YAML
 
 cat >"$PERSIST/homepage/config/widgets.yaml" <<'YAML'
@@ -154,7 +163,6 @@ YAML
 # ---------------------------------------------------------------------------
 # Compose stack. Both bind to loopback - Caddy is the only ingress.
 # ---------------------------------------------------------------------------
-mkdir -p /opt/hub
 cat >/opt/hub/compose.yaml <<COMPOSE
 services:
   uptime-kuma:
@@ -181,17 +189,70 @@ COMPOSE
 docker compose -f /opt/hub/compose.yaml up -d
 
 # ---------------------------------------------------------------------------
-# Caddy. Basic auth in front of everything - this dashboard links to the whole
-# estate, so it should not be world-readable.
+# Control panel. Fetched from the public repo so a rebuilt hub is complete
+# rather than needing a manual copy afterwards. The GitHub token is NOT
+# provisioned here - it is placed by hand once and survives in /etc/hub.
+# ---------------------------------------------------------------------------
+install -d -m 700 /etc/hub
+[ -f /etc/hub/github-token ] || { : > /etc/hub/github-token; chmod 600 /etc/hub/github-token; }
+
+curl -fsSL https://raw.githubusercontent.com/mn0ur/ephemeral-cloud-desktop/main/hub/control/control.py \
+  -o /opt/hub/control.py || echo "WARNING: could not fetch control panel"
+chmod 755 /opt/hub/control.py 2>/dev/null || true
+
+cat >/etc/systemd/system/hub-control.service <<'UNIT'
+[Unit]
+Description=Hub desktop control panel
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/hub/control.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now hub-control || echo "WARNING: hub-control failed to start"
+
+# ---------------------------------------------------------------------------
+# Caddy.
+#
+# The bcrypt hash is written through a QUOTED heredoc and substituted
+# afterwards. An UNQUOTED heredoc eats it: bcrypt looks like $2a$14$... and
+# the shell expands $2, $1 and $4 as positional parameters - all empty -
+# leaving an 11-character fragment. That produced:
+#
+#   http_basic: base64-decoding password: illegal base64 data at input byte 8
+#
+# and, far worse, `systemctl reload` failed SILENTLY on the broken config
+# while Caddy carried on serving the previous one. The fault sat undetected on
+# disk for half an hour and only surfaced when a restart forced it to load,
+# taking the whole dashboard down.
+#
+# Hence: assert the hash format, then validate the config, and only then
+# restart - so a bad config fails here, loudly, instead of lying in wait.
 # ---------------------------------------------------------------------------
 HASH="$(caddy hash-password --plaintext '${dashboard_password}')"
+case "$HASH" in
+  '$2a$'*|'$2b$'*|'$2y$'*) : ;;
+  *) echo "FATAL: caddy hash-password returned an unexpected format"; exit 1 ;;
+esac
 
-cat >/etc/caddy/Caddyfile <<CADDY
-$HOSTNAME_FQDN {
+cat >/etc/caddy/Caddyfile <<'CADDY'
+__HOSTNAME__ {
 	encode zstd gzip
 
 	basic_auth {
-		mnour $HASH
+		mnour __HASH__
+	}
+
+	handle_path /control* {
+		reverse_proxy 127.0.0.1:8000
 	}
 
 	handle_path /kuma* {
@@ -203,6 +264,19 @@ $HOSTNAME_FQDN {
 	}
 }
 CADDY
+
+python3 -c "
+import sys
+host, h = sys.argv[1], sys.argv[2]
+p = '/etc/caddy/Caddyfile'
+s = open(p).read().replace('__HOSTNAME__', host).replace('__HASH__', h)
+open(p, 'w').write(s)
+" "$HOSTNAME_FQDN" "$HASH"
+
+if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+  echo "FATAL: generated Caddyfile is invalid - refusing to restart Caddy."
+  exit 1
+fi
 
 systemctl enable caddy
 systemctl restart caddy

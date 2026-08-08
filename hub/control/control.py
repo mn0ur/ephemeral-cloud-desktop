@@ -167,9 +167,9 @@ PAGE = """<!doctype html>
 <script>
 const $=i=>document.getElementById(i);
 let busy=null, t0=0;
-// Typical cold start measured at ~80s; allow headroom so the bar does not sit
-// at 100% while still waiting.
-const EXPECT={start:150,destroy:90};
+// Measured on a real cycle: workflow completes at ~60s but the desktop only
+// answers at ~195s - the image pull and TLS happen after Terraform exits.
+const EXPECT={start:210,destroy:100}; // measured: start 195s (workflow 60s + image pull and TLS), destroy 90s
 
 function render(s){
   const up=s.desktop_up, run=s.run||{};

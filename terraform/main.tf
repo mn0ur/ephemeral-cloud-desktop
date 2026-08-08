@@ -4,6 +4,27 @@ locals {
   account_id  = data.aws_caller_identity.current.account_id
   data_bucket = "${var.project}-${local.account_id}-data"
   name        = var.project
+
+  # Must match terraform/persistent, which derives its AZ identically. An EBS
+  # volume can only attach to an instance in the same availability zone, so
+  # these two stacks have to agree without manual coordination.
+  az = "${var.region}a"
+}
+
+# The persistent /config volume, created by the terraform/persistent stack and
+# deliberately NOT managed here - destroying the desktop must never remove it.
+data "aws_ebs_volume" "data" {
+  most_recent = true
+
+  filter {
+    name   = "tag:Name"
+    values = ["${var.project}-data"]
+  }
+
+  filter {
+    name   = "availability-zone"
+    values = [local.az]
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -48,9 +69,11 @@ data "aws_availability_zones" "available" {
 }
 
 resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.20.1.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
+  vpc_id     = aws_vpc.main.id
+  cidr_block = "10.20.1.0/24"
+  # Pinned rather than taken from the AZ list: the instance must land in the
+  # same zone as the persistent EBS volume, or attachment fails.
+  availability_zone       = local.az
   map_public_ip_on_launch = true
 
   tags = { Name = "${local.name}-public" }
@@ -106,14 +129,9 @@ resource "aws_vpc_security_group_ingress_rule" "https" {
   ip_protocol       = "tcp"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "webrtc" {
-  security_group_id = aws_security_group.desktop.id
-  description       = "WebRTC media. Useless without ICE credentials from an authenticated session."
-  cidr_ipv4         = "0.0.0.0/0"
-  from_port         = split("-", var.webrtc_port_range)[0]
-  to_port           = split("-", var.webrtc_port_range)[1]
-  ip_protocol       = "udp"
-}
+// No UDP rule. The Selkies engine streams over a single TCP connection, so the
+// 100-port UDP range that neko's WebRTC media required is gone entirely -
+// and with it the reason Cloudflare's proxy could not sit in front.
 
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.desktop.id
@@ -250,13 +268,14 @@ resource "aws_instance" "desktop" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user-data.sh.tpl", {
-    data_bucket       = local.data_bucket
-    hostname          = var.hostname
-    screen            = var.screen
-    webrtc_port_range = var.webrtc_port_range
-    user_password     = random_password.user.result
-    admin_password    = random_password.admin.result
-    persistence       = var.enable_instance_role ? "true" : "false"
+    hostname     = var.hostname
+    image        = var.image
+    timezone     = var.timezone
+    web_user     = var.web_user
+    web_password = random_password.admin.result
+    encoder      = var.encoder
+    framerate    = var.framerate
+    data_device  = "/dev/sdf"
   })
 
   root_block_device {
@@ -286,6 +305,18 @@ resource "aws_instance" "desktop" {
   }
 
   tags = { Name = local.name }
+}
+
+# Attach the persistent volume. Destroying the desktop detaches it; the volume
+# itself survives in the persistent stack.
+resource "aws_volume_attachment" "data" {
+  device_name = "/dev/sdf"
+  volume_id   = data.aws_ebs_volume.data.id
+  instance_id = aws_instance.desktop.id
+
+  # Let terraform destroy detach even if the OS still has it mounted. Without
+  # this a destroy can hang waiting for a graceful detach that never comes.
+  force_detach = true
 }
 
 # ---------------------------------------------------------------------------

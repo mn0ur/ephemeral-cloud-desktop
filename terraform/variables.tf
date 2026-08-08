@@ -90,8 +90,31 @@ variable "screen" {
   default     = "1920x1080@30"
 }
 
-variable "webrtc_port_range" {
-  description = "WebRTC ephemeral UDP range. Must be mapped 1:1 into the container - upstream requires no remapping."
+variable "image" {
+  description = "Desktop image. linuxserver/webtop runs the Selkies engine: single TCP port, audio and microphone, up to 120fps, and ~20 desktop variants (alpine/arch/debian/fedora/ubuntu x xfce/kde/i3/mate)."
   type        = string
-  default     = "52000-52100"
+  default     = "lscr.io/linuxserver/webtop:debian-kde"
+}
+
+variable "encoder" {
+  description = "Selkies video encoder. x264enc is software H.264 - correct for a CPU instance. GPU instances can use nvh264enc."
+  type        = string
+  default     = "x264enc"
+}
+
+variable "framerate" {
+  description = "Target framerate. Selkies accepts 8-120."
+  type        = number
+  default     = 60
+}
+
+variable "timezone" {
+  type    = string
+  default = "Asia/Dubai"
+}
+
+variable "web_user" {
+  description = "Basic auth username. NOTE: upstream states basic auth alone is inadequate for internet exposure - Cloudflare Access should front this."
+  type        = string
+  default     = "mnour"
 }

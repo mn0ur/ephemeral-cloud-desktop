@@ -46,7 +46,7 @@ variable "root_volume_gb" {
 variable "hostname" {
   description = "Public hostname served by Caddy with automatic TLS."
   type        = string
-  default     = "desktop.mnour.sd"
+  default     = "desk.mnour.sd"
 }
 
 variable "cloudflare_zone" {

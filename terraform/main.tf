@@ -332,22 +332,42 @@ resource "aws_volume_attachment" "data" {
 }
 
 # ---------------------------------------------------------------------------
-# DNS.
+# DNS - updated IN PLACE, never deleted.
 #
-# DNS-only, NOT proxied. Cloudflare's proxy cannot carry WebRTC's UDP media,
-# and proxying would also break Let's Encrypt HTTP-01 validation on the box.
+# A managed cloudflare_record was destroyed on every teardown, so resolvers
+# cached NXDOMAIN and the hostname stayed broken for the zone's negative-cache
+# TTL even after the desktop returned. Tailscale's MagicDNS held onto it for
+# ~30 minutes.
+#
+# The record now always exists. It is parked on 192.0.2.1 when the desktop is
+# down - RFC 5737 TEST-NET-1, permanently unroutable and unclaimable. Parking
+# it on the released elastic IP instead would invite a subdomain takeover,
+# where someone else's content is served from this hostname.
+#
+# Cloudflare's provider has no "update but never destroy" mode, so this is a
+# null_resource driving the API directly, with a destroy-time provisioner to
+# park it.
 # ---------------------------------------------------------------------------
+resource "null_resource" "dns" {
+  triggers = {
+    fqdn = var.hostname
+    ip   = aws_instance.desktop.public_ip
+    # Destroy-time provisioners may only reference self.triggers, so the
+    # script path and parked address have to live here too.
+    script = "${path.module}/../scripts/set-dns.sh"
+    parked = "192.0.2.1"
+  }
 
-data "cloudflare_zone" "main" {
-  name = var.cloudflare_zone
-}
+  provisioner "local-exec" {
+    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.ip}'"
+    interpreter = ["bash", "-c"]
+  }
 
-resource "cloudflare_record" "desktop" {
-  zone_id = data.cloudflare_zone.main.id
-  name    = replace(var.hostname, ".${var.cloudflare_zone}", "")
-  content = aws_instance.desktop.public_ip
-  type    = "A"
-  ttl     = 60
-  proxied = false
-  comment = "Ephemeral desktop. Managed by terraform; IP changes every apply."
+  provisioner "local-exec" {
+    when        = destroy
+    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.parked}'"
+    interpreter = ["bash", "-c"]
+    # Never let a DNS hiccup block a teardown - the instance must still go.
+    on_failure = continue
+  }
 }

@@ -208,7 +208,18 @@ docker exec webtop bash -lc "chfn -f '${web_user}' abc 2>/dev/null || true; \
 cat >/etc/caddy/Caddyfile <<CADDY
 $HOSTNAME_FQDN {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:3000
+
+	# Unauthenticated liveness probe. The desktop itself answers 401 when it
+	# is perfectly healthy - that is the login prompt - and most monitors
+	# score 401 as DOWN. This gives monitoring an unambiguous signal:
+	# 200 means running, connection refused means destroyed.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
 }
 CADDY
 

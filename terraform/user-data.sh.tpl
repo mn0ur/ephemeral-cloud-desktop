@@ -110,6 +110,17 @@ docker pull "$IMAGE"
 # costs nothing and guarantees whichever the image reads is populated. Getting
 # this wrong is the classic failure - the UI loads and media never connects,
 # because ICE advertises an address the client cannot reach.
+# Member profiles MUST be set explicitly.
+#
+# Both admin_profile and user_profile default to "{}" upstream. That empty
+# JSON unmarshals into a Go struct where every boolean takes its zero value -
+# false - including can_host, which governs mouse and keyboard input. The
+# result is a session that connects, negotiates WebRTC and renders video
+# perfectly while silently ignoring every click. Setting the fields
+# explicitly is the fix; do not "simplify" this back to {}.
+ADMIN_PROFILE='{"is_admin":true,"can_login":true,"can_connect":true,"can_watch":true,"can_host":true,"can_share_media":true,"can_access_clipboard":true,"sends_inactive_cursor":true,"can_see_inactive_cursors":true}'
+USER_PROFILE='{"is_admin":false,"can_login":true,"can_connect":true,"can_watch":true,"can_host":true,"can_share_media":true,"can_access_clipboard":true,"sends_inactive_cursor":true,"can_see_inactive_cursors":false}'
+
 docker run -d \
   --name neko \
   --restart unless-stopped \
@@ -120,10 +131,14 @@ docker run -d \
   -e NEKO_DESKTOP_SCREEN='${screen}' \
   -e NEKO_MEMBER_MULTIUSER_USER_PASSWORD='${user_password}' \
   -e NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD='${admin_password}' \
+  -e NEKO_MEMBER_MULTIUSER_ADMIN_PROFILE="$ADMIN_PROFILE" \
+  -e NEKO_MEMBER_MULTIUSER_USER_PROFILE="$USER_PROFILE" \
   -e NEKO_WEBRTC_EPR='${webrtc_port_range}' \
   -e NEKO_WEBRTC_ICELITE=1 \
   -e NEKO_WEBRTC_NAT1TO1="$PUBLIC_IP" \
   -e NEKO_NAT1TO1="$PUBLIC_IP" \
+  -e NEKO_SESSION_IMPLICIT_HOSTING=1 \
+  -e NEKO_SESSION_LOCKED_CONTROLS=0 \
   "$IMAGE"
 
 # Record the package baseline inside the running container so mid-session

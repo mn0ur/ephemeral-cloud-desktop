@@ -16,6 +16,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   backend "s3" {
@@ -90,4 +94,41 @@ output "volume_id" {
 output "availability_zone" {
   description = "The desktop instance MUST launch in this AZ."
   value       = aws_ebs_volume.data.availability_zone
+}
+
+# ---------------------------------------------------------------------------
+# Desktop credentials.
+#
+# These live HERE, not in the desktop stack, for the same reason the data
+# volume does: anything that should outlive the machine belongs in the stack
+# that outlives the machine. Held in the desktop stack they were destroyed on
+# every teardown, so the password changed on every start - which pushed the
+# operator into keeping a plaintext copy on their desktop, and tempted a
+# 'let me type my own' workaround that would have published the password in a
+# public repository's Actions log.
+#
+# The password never travels through CI. The desktop stack reads it straight
+# from this stack's state, which is encrypted in S3.
+# ---------------------------------------------------------------------------
+
+resource "random_password" "desktop_admin" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "desktop_user" {
+  length  = 24
+  special = false
+}
+
+output "desktop_admin_password" {
+  description = "Stable desktop admin password. Survives every destroy."
+  value       = random_password.desktop_admin.result
+  sensitive   = true
+}
+
+output "desktop_user_password" {
+  description = "Stable desktop viewer password."
+  value       = random_password.desktop_user.result
+  sensitive   = true
 }

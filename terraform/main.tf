@@ -1,5 +1,20 @@
 data "aws_caller_identity" "current" {}
 
+# ---------------------------------------------------------------------------
+# The persistent stack holds the desktop credentials, so they survive every
+# teardown. Reading them here means the password never travels through CI and
+# never appears in a workflow log.
+# ---------------------------------------------------------------------------
+data "terraform_remote_state" "persistent" {
+  backend = "s3"
+
+  config = {
+    bucket = "ephemeral-desktop-643902831477-tfstate"
+    key    = "persistent/terraform.tfstate"
+    region = "me-central-1"
+  }
+}
+
 locals {
   account_id  = data.aws_caller_identity.current.account_id
   data_bucket = "${var.project}-${local.account_id}-data"
@@ -17,7 +32,7 @@ locals {
   # Explicit password when supplied, generated otherwise. Lets a desktop be
   # handed to someone else with credentials you choose, without weakening the
   # default - which stays a generated 32-character secret.
-  web_password = var.web_password_override != "" ? var.web_password_override : random_password.admin.result
+  web_password = var.web_password_override != "" ? var.web_password_override : data.terraform_remote_state.persistent.outputs.desktop_admin_password
 }
 
 # The persistent /config volume, created by the terraform/persistent stack and
@@ -37,21 +52,6 @@ data "aws_ebs_volume" "data" {
     name   = "availability-zone"
     values = [local.az]
   }
-}
-
-# ---------------------------------------------------------------------------
-# Passwords. Generated, never typed. Held in encrypted remote state and
-# surfaced through sensitive outputs.
-# ---------------------------------------------------------------------------
-
-resource "random_password" "user" {
-  length  = 24
-  special = false
-}
-
-resource "random_password" "admin" {
-  length  = 32
-  special = false
 }
 
 # ---------------------------------------------------------------------------

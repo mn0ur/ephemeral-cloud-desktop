@@ -19,13 +19,13 @@ output "data_bucket" {
 }
 
 output "user_password" {
-  description = "neko viewer password."
-  value       = random_password.user.result
+  description = "Desktop viewer password. Stable across rebuilds."
+  value       = data.terraform_remote_state.persistent.outputs.desktop_user_password
   sensitive   = true
 }
 
 output "admin_password" {
-  description = "neko admin password."
+  description = "Desktop admin password. Stable across rebuilds - lives in the persistent stack."
   value       = local.web_password
   sensitive   = true
 }

@@ -125,7 +125,7 @@ if [ -d "$PERSIST_ROOT/.config" ] && [ ! -d "$CONFIG_DIR" ]; then
     -exec mv -t "$CONFIG_DIR" {} +
 fi
 
-mkdir -p "$CONFIG_DIR" "$DOCKER_ROOT"
+mkdir -p "$CONFIG_DIR" "$DOCKER_ROOT" "$PERSIST_ROOT/caddy"
 chown -R 1000:1000 "$CONFIG_DIR"
 df -h "$PERSIST_ROOT"
 
@@ -223,6 +223,31 @@ $HOSTNAME_FQDN {
 }
 CADDY
 
+# ---------------------------------------------------------------------------
+# Caddy's certificate storage lives on the PERSISTENT volume.
+#
+# Without this, every rebuild discards a perfectly good 90-day certificate and
+# asks Let's Encrypt for a new one. LE allows 5 certificates per hostname per
+# 168 hours, so a handful of rebuilds in a day exhausts the quota and the
+# desktop comes up with no trusted cert at all:
+#
+#   HTTP 429 rateLimited - too many certificates (5) already issued for this
+#   exact set of identifiers in the last 168h0m0s
+#
+# That is a hard wall, not a warning - it locked the desktop out for a day.
+# Persisting the store means one certificate is reused across every rebuild
+# and ACME is contacted roughly every 60 days for renewal instead.
+# ---------------------------------------------------------------------------
+mkdir -p "$PERSIST_ROOT/caddy"
+chown -R caddy:caddy "$PERSIST_ROOT/caddy" 2>/dev/null || true
+
+mkdir -p /etc/systemd/system/caddy.service.d
+cat >/etc/systemd/system/caddy.service.d/override.conf <<OVERRIDE
+[Service]
+Environment=XDG_DATA_HOME=$PERSIST_ROOT/caddy
+OVERRIDE
+
+systemctl daemon-reload
 systemctl enable caddy
 systemctl restart caddy
 

@@ -139,6 +139,46 @@ cat >/etc/docker/daemon.json <<DOCKERCFG
 }
 DOCKERCFG
 
+# ---------------------------------------------------------------------------
+# containerd's root must move too - and this is the part that is easy to get
+# wrong.
+#
+# Ubuntu 24.04's docker.io uses the containerd snapshotter
+# (io.containerd.snapshotter.v1). Image layers AND container writable layers
+# therefore live in /var/lib/containerd, which docker's data-root does NOT
+# control. Setting data-root alone moved 976KB while 5.8GB of images stayed
+# on the ephemeral root disk - so every rebuild re-pulled a 2GB image, and
+# anything apt-installed inside the desktop was silently lost on destroy.
+#
+# A bind mount is used rather than editing containerd's config because it
+# works regardless of how the distribution packages containerd, and it is
+# obvious in `findmnt` when someone comes to debug this later.
+# ---------------------------------------------------------------------------
+CONTAINERD_ROOT="$PERSIST_ROOT/containerd"
+mkdir -p "$CONTAINERD_ROOT" /var/lib/containerd
+
+systemctl stop containerd 2>/dev/null || true
+
+# Preserve anything already written before the bind takes effect.
+if [ -n "$(ls -A /var/lib/containerd 2>/dev/null)" ] && [ -z "$(ls -A "$CONTAINERD_ROOT" 2>/dev/null)" ]; then
+  echo "seeding containerd root onto the volume"
+  cp -a /var/lib/containerd/. "$CONTAINERD_ROOT/" 2>/dev/null || true
+fi
+
+grep -q "$CONTAINERD_ROOT /var/lib/containerd" /etc/fstab ||   echo "$CONTAINERD_ROOT /var/lib/containerd none bind,nofail 0 0" >> /etc/fstab
+mount --bind "$CONTAINERD_ROOT" /var/lib/containerd
+
+# Assert, for the same reason as every other mount here: a bind that silently
+# fails leaves images on ephemeral storage and nothing looks wrong.
+if [ "$(stat -c %d /var/lib/containerd)" != "$(stat -c %d "$PERSIST_ROOT")" ]; then
+  echo "FATAL: /var/lib/containerd is not on the persistent volume."
+  echo "Images and container layers would be lost on every destroy."
+  exit 1
+fi
+echo "verified: /var/lib/containerd bound onto $PERSIST_ROOT"
+
+systemctl enable containerd
+systemctl start containerd
 systemctl enable docker
 systemctl start docker
 

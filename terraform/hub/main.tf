@@ -32,6 +32,7 @@ provider "aws" {
 
   default_tags {
     tags = {
+      Owner     = "mnour"
       Project   = "ephemeral-desktop"
       ManagedBy = "terraform"
       Stack     = "hub"
@@ -105,6 +106,9 @@ variable "monitor_targets" {
 
 locals {
   az = "${var.region}a"
+
+  # Tags only - var.name still builds SG and key pair names.
+  display = "mnour-hub"
 }
 
 # ---------------------------------------------------------------------------
@@ -121,7 +125,7 @@ resource "aws_ebs_volume" "data" {
   type              = "gp3"
   encrypted         = true
 
-  tags = { Name = "${var.name}-data" }
+  tags = { Name = "mnour-hub-data" }
 
   lifecycle {
     prevent_destroy = true
@@ -138,12 +142,12 @@ resource "aws_vpc" "main" {
   cidr_block           = "10.30.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags                 = { Name = var.name }
+  tags                 = { Name = local.display }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = var.name }
+  tags   = { Name = local.display }
 }
 
 resource "aws_subnet" "public" {
@@ -151,7 +155,7 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.30.1.0/24"
   availability_zone       = local.az
   map_public_ip_on_launch = true
-  tags                    = { Name = "${var.name}-public" }
+  tags                    = { Name = "${local.display}-public" }
 }
 
 resource "aws_route_table" "public" {
@@ -162,7 +166,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.main.id
   }
 
-  tags = { Name = "${var.name}-public" }
+  tags = { Name = "${local.display}-public" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -174,7 +178,7 @@ resource "aws_security_group" "hub" {
   name        = "${var.name}-sg"
   description = "Hub: HTTPS dashboard. SSH for admin until SSM is available."
   vpc_id      = aws_vpc.main.id
-  tags        = { Name = var.name }
+  tags        = { Name = local.display }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "http" {
@@ -264,7 +268,7 @@ resource "aws_instance" "hub" {
     http_endpoint = "enabled"
   }
 
-  tags = { Name = var.name }
+  tags = { Name = local.display }
 }
 
 resource "aws_volume_attachment" "data" {

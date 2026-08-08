@@ -22,6 +22,7 @@ provider "aws" {
 
   default_tags {
     tags = {
+      Owner     = "mnour"
       Project   = var.project
       ManagedBy = "terraform"
       Stack     = "desktop"

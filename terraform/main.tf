@@ -9,6 +9,10 @@ locals {
   # volume can only attach to an instance in the same availability zone, so
   # these two stacks have to agree without manual coordination.
   az = "${var.region}a"
+
+  # Display name for tags only. local.name still builds security group, key
+  # pair and IAM names - renaming those would force replacements.
+  display = "mnour-desktop"
 }
 
 # The persistent /config volume, created by the terraform/persistent stack and
@@ -16,9 +20,12 @@ locals {
 data "aws_ebs_volume" "data" {
   most_recent = true
 
+  # Keyed on Role, NOT Name. Looking up by display name coupled this stack to
+  # a cosmetic tag - renaming the volume for readability broke the lookup and
+  # failed the apply. Role describes what the volume IS, so it never changes.
   filter {
-    name   = "tag:Name"
-    values = ["${var.project}-data"]
+    name   = "tag:Role"
+    values = ["desktop-config"]
   }
 
   filter {
@@ -56,12 +63,12 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
-  tags = { Name = local.name }
+  tags = { Name = local.display }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = local.name }
+  tags   = { Name = local.display }
 }
 
 data "aws_availability_zones" "available" {
@@ -76,7 +83,7 @@ resource "aws_subnet" "public" {
   availability_zone       = local.az
   map_public_ip_on_launch = true
 
-  tags = { Name = "${local.name}-public" }
+  tags = { Name = "${local.display}-public" }
 }
 
 resource "aws_route_table" "public" {
@@ -87,7 +94,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.main.id
   }
 
-  tags = { Name = "${local.name}-public" }
+  tags = { Name = "${local.display}-public" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -108,7 +115,7 @@ resource "aws_security_group" "desktop" {
   description = "Desktop: HTTPS UI and WebRTC media. No SSH - SSM only."
   vpc_id      = aws_vpc.main.id
 
-  tags = { Name = local.name }
+  tags = { Name = local.display }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "http" {
@@ -304,7 +311,7 @@ resource "aws_instance" "desktop" {
     }
   }
 
-  tags = { Name = local.name }
+  tags = { Name = local.display }
 }
 
 # Attach the persistent volume. Destroying the desktop detaches it; the volume

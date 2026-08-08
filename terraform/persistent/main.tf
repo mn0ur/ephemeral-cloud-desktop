@@ -32,6 +32,7 @@ provider "aws" {
 
   default_tags {
     tags = {
+      Owner     = "mnour"
       Project   = var.project
       ManagedBy = "terraform"
       Stack     = "persistent"
@@ -70,7 +71,7 @@ resource "aws_ebs_volume" "data" {
   encrypted         = true
 
   tags = {
-    Name = "${var.project}-data"
+    Name = "mnour-desktop-data"
     Role = "desktop-config"
   }
 

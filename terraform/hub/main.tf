@@ -383,6 +383,22 @@ resource "cloudflare_record" "hub" {
   comment = "Hub dashboard. Managed by terraform."
 }
 
+# desktop.mnour.dev - the self-service product's own site, on the same
+# instance. Genuinely missing until now: the Caddy site block and the
+# DNS-01 Cloudflare token both got added, but nothing ever created the
+# actual A record this depends on - DNS-01 only creates a TEMPORARY TXT
+# record to prove ownership for the certificate, not this permanent one
+# that real browser traffic needs to find the instance at all.
+resource "cloudflare_record" "desktop_product" {
+  zone_id = data.cloudflare_zone.main.id
+  name    = "desktop"
+  content = aws_instance.hub.public_ip
+  type    = "A"
+  ttl     = 60
+  proxied = false
+  comment = "desktop.mnour.dev - guest self-service product. Managed by terraform."
+}
+
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------

@@ -27,10 +27,29 @@ if [ -n "$CF_DNS_TOKEN" ]; then
   # Caddy build with the cloudflare-dns module compiled in, which stock
   # apt Caddy does not have. Caddy's own build service produces one -
   # no local Go toolchain, no xcaddy.
-  echo "fetching Caddy with the Cloudflare DNS module"
-  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/cloudflare" \
+  # Detected, not hardcoded: this hub runs on t4g (Graviton/ARM), but was
+  # first written with a hardcoded amd64 - which downloads and silently
+  # accepts a binary for the wrong CPU. `curl -f` does not catch this: the
+  # download itself succeeds, the file is valid, it simply cannot execute
+  # ("Exec format error") when caddy.service starts. That took the first
+  # real desktop.mnour.dev deploy down at the exact point of switching to
+  # this custom build, hot-patched live, fixed here so the next instance
+  # replacement - ARM or not - gets the right binary from boot.
+  case "$(uname -m)" in
+    aarch64) CADDY_ARCH="arm64" ;;
+    x86_64)  CADDY_ARCH="amd64" ;;
+    *) echo "FATAL: unrecognised architecture $(uname -m) for the Caddy build"; exit 1 ;;
+  esac
+  echo "fetching Caddy with the Cloudflare DNS module ($CADDY_ARCH)"
+  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$CADDY_ARCH&p=github.com/caddy-dns/cloudflare" \
     -o /usr/bin/caddy
   chmod 755 /usr/bin/caddy
+  # The download succeeding is not proof it can run - verify directly,
+  # rather than trusting curl's exit code the way this failed the first time.
+  if ! /usr/bin/caddy version >/dev/null 2>&1; then
+    echo "FATAL: downloaded caddy binary will not execute on this architecture."
+    exit 1
+  fi
   id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
   mkdir -p /etc/caddy /var/lib/caddy
   chown -R caddy:caddy /var/lib/caddy

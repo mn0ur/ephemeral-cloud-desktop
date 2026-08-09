@@ -48,10 +48,26 @@ if [ -n "$CF_DNS_TOKEN" ]; then
   # toolchain needed, no xcaddy. Falls back to the stock apt package (plain
   # HTTP-01, exactly as before this variable existed) when no token is
   # supplied, which is always true for the owner's own desk.mnour.dev today.
-  echo "fetching Caddy with the Cloudflare DNS module"
-  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/cloudflare" \
+  # Detected, not hardcoded: instance_type is user-configurable, and
+  # hardcoding this exact call on the hub's own script downloaded an
+  # amd64 binary for a Graviton (ARM) instance - it fetched fine, and
+  # then could not execute at all ("Exec format error") the moment
+  # caddy.service tried to start it. c7i.xlarge is genuinely amd64 today,
+  # but detecting it is what stops this from silently repeating if that
+  # ever changes.
+  case "$(uname -m)" in
+    aarch64) CADDY_ARCH="arm64" ;;
+    x86_64)  CADDY_ARCH="amd64" ;;
+    *) echo "FATAL: unrecognised architecture $(uname -m) for the Caddy build"; exit 1 ;;
+  esac
+  echo "fetching Caddy with the Cloudflare DNS module ($CADDY_ARCH)"
+  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$CADDY_ARCH&p=github.com/caddy-dns/cloudflare" \
     -o /usr/bin/caddy
   chmod 755 /usr/bin/caddy
+  if ! /usr/bin/caddy version >/dev/null 2>&1; then
+    echo "FATAL: downloaded caddy binary will not execute on this architecture."
+    exit 1
+  fi
   id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
   mkdir -p /etc/caddy /var/lib/caddy
   chown -R caddy:caddy /var/lib/caddy

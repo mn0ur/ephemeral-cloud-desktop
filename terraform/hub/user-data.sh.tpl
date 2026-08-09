@@ -273,9 +273,25 @@ curl -fsSL https://raw.githubusercontent.com/mn0ur/ephemeral-cloud-desktop/main/
   -o /opt/hub/control.py || echo "WARNING: could not fetch control panel"
 chmod 755 /opt/hub/control.py 2>/dev/null || true
 
+# ADMIN_GOOGLE_SUB has the same problem the GitHub token had: it is only
+# actually knowable AFTER the owner signs in once (it comes from their real
+# Google account's "sub" claim, seen in a request, not chosen ahead of
+# time), which means it always gets set by hand once, after the fact - and
+# /etc/hub is on the ephemeral root disk, so a plain Terraform variable
+# here would silently lose that hand-set value on every future instance
+# replacement, exactly like the token did. A file on the persistent volume
+# overrides the Terraform variable when present, so setting it once (by
+# hand, or via any future automation) survives from here on.
+mkdir -p /mnt/hubdata/control
+[ -f /mnt/hubdata/control/admin_google_sub ] || : > /mnt/hubdata/control/admin_google_sub
+ADMIN_GOOGLE_SUB="${admin_google_sub}"
+if [ -s /mnt/hubdata/control/admin_google_sub ]; then
+  ADMIN_GOOGLE_SUB="$(cat /mnt/hubdata/control/admin_google_sub)"
+fi
+
 cat >/etc/hub/control.env <<ENVFILE
 GOOGLE_CLIENT_ID=${google_client_id}
-ADMIN_GOOGLE_SUB=${admin_google_sub}
+ADMIN_GOOGLE_SUB=$ADMIN_GOOGLE_SUB
 SESSION_SECRET=${session_secret}
 HUB_CALLBACK_SECRET=${hub_callback_secret}
 ENVFILE

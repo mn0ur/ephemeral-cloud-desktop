@@ -151,3 +151,60 @@ variable "web_password_override" {
   default     = ""
   sensitive   = true
 }
+
+# ---------------------------------------------------------------------------
+# Guest self-service slots.
+#
+# Everything below defaults to "off" - empty slot means this apply IS the
+# original single-user desktop, byte-identical to before these variables
+# existed. Nothing about the owner's own desktop changes unless a workflow
+# explicitly passes slot = "a" or "b".
+#
+# Only two slots exist, ever. That is what makes "at most 2 concurrent
+# desktops" true without a counter to keep in sync anywhere - there is
+# structurally nowhere for a third one to run.
+# ---------------------------------------------------------------------------
+
+variable "slot" {
+  description = "Guest slot: \"\" (default) is the owner's own desktop. \"a\" or \"b\" is a guest slot with its own hostname, IAM role and security group so two can run at once without name collisions."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "a", "b"], var.slot)
+    error_message = "slot must be \"\", \"a\", or \"b\" - there are only two guest slots by design."
+  }
+}
+
+variable "user_id" {
+  description = "Stable identifier for a guest (derived from their Google account). Only used for tagging when slot != \"\"."
+  type        = string
+  default     = ""
+}
+
+variable "owner_email" {
+  description = "Guest's email, for tagging only. Never used in any resource name."
+  type        = string
+  default     = ""
+}
+
+variable "user_volume_id" {
+  description = <<-EOT
+    An existing EBS volume ID to attach for this guest's persistent data, or
+    empty for a fully ephemeral session with no data volume at all.
+
+    Created (or looked up) by the workflow BEFORE apply, via the AWS CLI -
+    not by Terraform. A Terraform data source cannot express "create this if
+    it does not exist yet", and the instance itself has no AWS credentials to
+    do it from inside user-data. Empty here means nothing is attached, so a
+    guest who chose "don't keep my data" has nothing left to lose.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "kill_at" {
+  description = "RFC3339 timestamp tagged onto the instance. The desktop-reaper workflow destroys anything past this time, regardless of activity. Empty (default) means no forced destroy - only guest sessions get one."
+  type        = string
+  default     = ""
+}

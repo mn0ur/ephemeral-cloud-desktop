@@ -1,6 +1,6 @@
 output "url" {
   description = "Where the desktop lives once DNS and TLS settle."
-  value       = "https://${var.hostname}"
+  value       = "https://${local.effective_hostname}"
 }
 
 output "public_ip" {

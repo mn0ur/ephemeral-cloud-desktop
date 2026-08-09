@@ -17,14 +17,38 @@ Design notes worth keeping:
   through a fixed dict rather than interpolated from user input, so a crafted
   request cannot trigger arbitrary workflows.
 
+* This panel holds NO AWS or Terraform credentials, on purpose - only a
+  GitHub PAT. It cannot read `terraform output` itself, so a guest's URL and
+  password have to be handed to it by the workflow, via a callback endpoint
+  authenticated with a separate shared secret (HUB_CALLBACK_SECRET). A
+  compromised panel therefore can never touch AWS directly, only trigger the
+  same two fixed workflows a human already could.
+
+* Only two guest slots exist, ever ("a" and "b"). That is what makes "at
+  most 2 concurrent desktops" true without a counter anywhere that could get
+  out of sync - there is structurally nowhere for a third one to run.
+
+* Google sign-in is verified via Google's own tokeninfo endpoint rather than
+  a JWT library, to keep this stdlib-only. Google validates the signature and
+  expiry server-side; this code only has to check the audience and email
+  verification on the response. Sessions are a home-rolled HMAC-signed
+  cookie (stdlib hmac + hashlib), not a session store - there is nothing here
+  worth the operational cost of a database for two concurrent slots.
+
 Stdlib only - no pip install on a box that is meant to stay boring.
 """
 
+import base64
+import hashlib
+import hmac
+import http.cookies
 import json
 import os
+import re
 import ssl
-import subprocess
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,9 +57,22 @@ TOKEN_FILE = os.environ.get("GH_TOKEN_FILE", "/etc/hub/github-token")
 DESKTOP_URL = os.environ.get("DESKTOP_URL", "https://desk.mnour.sd")
 LISTEN = ("127.0.0.1", 8000)
 
+# Where guest slot state persists across a hub restart. On the hub's own
+# EBS volume, same reasoning as Uptime Kuma's data: a service restart must
+# not make the control panel forget who owns a currently-running slot.
+SLOTS_FILE = os.environ.get("SLOTS_FILE", "/mnt/hubdata/control/slots.json")
+SLOTS = ("a", "b")
+
 # Measured spot price for c7i.xlarge in eu-central-1. Used only to show a
 # running estimate - the authoritative number is always the AWS bill.
 HOURLY_USD = float(os.environ.get("HOURLY_USD", "0.104"))
+
+# Guest sign-in. Empty GOOGLE_CLIENT_ID is a valid, safe state - see below.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+ADMIN_GOOGLE_SUB = os.environ.get("ADMIN_GOOGLE_SUB", "")
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
+HUB_CALLBACK_SECRET = os.environ.get("HUB_CALLBACK_SECRET", "")
+SESSION_MAX_AGE = 12 * 3600  # sign back in daily; nothing here needs longer
 
 # Fixed allow-list. Never build a workflow filename from request input.
 WORKFLOWS = {
@@ -73,15 +110,19 @@ def gh(method, path, payload=None):
         return json.loads(body) if body else {}
 
 
-def desktop_up():
-    """200 from /healthz means running. Anything else means not ready."""
+def url_up(url, timeout=6):
+    """200 from <url>/healthz means running. Anything else means not ready."""
     ctx = ssl.create_default_context()
     try:
-        req = urllib.request.Request(f"{DESKTOP_URL}/healthz", method="GET")
-        with urllib.request.urlopen(req, timeout=6, context=ctx) as r:
+        req = urllib.request.Request(f"{url}/healthz", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             return r.status == 200
     except Exception:
         return False
+
+
+def desktop_up():
+    return url_up(DESKTOP_URL)
 
 
 def latest_run():
@@ -114,6 +155,146 @@ def latest_run():
     }
 
 
+# ---------------------------------------------------------------------------
+# Guest slot state. A flat JSON file, not a database - two slots do not
+# justify one, and the file lives on the hub's persistent volume so a
+# service restart mid-session does not forget who owns what.
+# ---------------------------------------------------------------------------
+
+def _load_slots():
+    try:
+        with open(SLOTS_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    for s in SLOTS:
+        data.setdefault(s, {"status": "idle"})
+    return data
+
+
+def _save_slots(data):
+    os.makedirs(os.path.dirname(SLOTS_FILE), exist_ok=True)
+    tmp = SLOTS_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, SLOTS_FILE)  # atomic - a crash mid-write cannot corrupt it
+
+
+def free_slot(slots):
+    for s in SLOTS:
+        if slots.get(s, {}).get("status") in ("idle", "error"):
+            return s
+    return None
+
+
+PENDING_TIMEOUT_S = 10 * 60  # a workflow that fails to reach "ready" this long is stuck, not slow
+
+
+def refresh_slots(slots):
+    """Two things nothing else in this file does on its own:
+
+    ready -> active, once the guest's own /healthz actually answers. Without
+    this a slot sits at "Booting..." forever even after the desktop is up,
+    because the session-ready callback fires right after `terraform apply`
+    returns - well before the container has pulled and TLS has settled.
+
+    pending -> error, if session-ready never arrives within 10 minutes. A
+    failed workflow run (bad AMI, spot capacity, a Terraform error) would
+    otherwise hold a slot "in use" forever - one of only two that exist.
+    """
+    changed = False
+    now = time.time()
+    for name in SLOTS:
+        s = slots.get(name, {"status": "idle"})
+        if s.get("status") == "ready" and url_up(s.get("url") or ""):
+            s["status"] = "active"
+            changed = True
+        elif s.get("status") == "pending" and now - s.get("dispatched_at", now) > PENDING_TIMEOUT_S:
+            slots[name] = {"status": "error"}
+            changed = True
+    if changed:
+        _save_slots(slots)
+    return slots
+
+
+# ---------------------------------------------------------------------------
+# Sessions. HMAC-signed, not encrypted - the payload (email, a slugified user
+# id, expiry) is not secret, only tamper-evidence matters. base64url so it
+# survives as a cookie value with no escaping headaches.
+# ---------------------------------------------------------------------------
+
+def _b64(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _unb64(s):
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def sign_session(payload: dict) -> str:
+    body = _b64(json.dumps(payload).encode())
+    sig = hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}.{sig}"
+
+
+def verify_session(cookie_value: str):
+    if not cookie_value or not SESSION_SECRET:
+        return None
+    try:
+        body, sig = cookie_value.split(".", 1)
+    except ValueError:
+        return None
+    expected = hmac.new(SESSION_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None  # tampered or signed with an old/different secret
+    try:
+        payload = json.loads(_unb64(body))
+    except Exception:
+        return None
+    if payload.get("exp", 0) < time.time():
+        return None
+    return payload
+
+
+def user_id_from(email: str, sub: str) -> str:
+    """A filesystem/tag/DNS-safe, stable-per-Google-account slug.
+
+    Built from the email's local part plus a short hash of the account's
+    stable Google "sub" (not the email itself - emails can change ownership
+    on some providers, sub cannot), so two different Google accounts that
+    happen to share an email-like local part never collide.
+    """
+    local = (email.split("@")[0] if "@" in email else email).lower()
+    local = re.sub(r"[^a-z0-9-]+", "-", local).strip("-")[:20] or "guest"
+    suffix = hashlib.sha256(sub.encode()).hexdigest()[:6]
+    return f"{local}-{suffix}"
+
+
+def verify_google_token(credential: str):
+    """Ask Google to verify the ID token, rather than checking the RS256
+    signature locally - that would need a JWT/crypto library, which is
+    exactly what "stdlib only" rules out. Google validates signature and
+    expiry; this only has to check audience and that the email is verified.
+    """
+    ctx = ssl.create_default_context()
+    q = urllib.parse.urlencode({"id_token": credential})
+    req = urllib.request.Request(f"https://oauth2.googleapis.com/tokeninfo?{q}")
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=ctx) as r:
+            claims = json.loads(r.read())
+    except urllib.error.HTTPError:
+        return None  # Google rejected it outright - expired, malformed, forged
+    except Exception:
+        return None
+
+    if not GOOGLE_CLIENT_ID or claims.get("aud") != GOOGLE_CLIENT_ID:
+        return None  # not a token issued for THIS app
+    if claims.get("email_verified") not in ("true", True):
+        return None
+    return claims
+
+
 PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -136,7 +317,7 @@ PAGE = """<!doctype html>
  }
  *{box-sizing:border-box}
  body{margin:0;font:14px/1.6 var(--mono);background:var(--bg);color:var(--text);
-      display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem;
+      display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:1.5rem 1rem;gap:1.2rem;
       background-image:linear-gradient(rgba(22,40,60,.25) 1px,transparent 1px),
                        linear-gradient(90deg,rgba(22,40,60,.25) 1px,transparent 1px);
       background-size:44px 44px}
@@ -149,6 +330,7 @@ PAGE = """<!doctype html>
  .bar-top i:nth-child(3){background:var(--green)}
  h1{margin:0 0 .2rem;font-size:1.05rem;color:var(--green);font-weight:600;letter-spacing:.5px}
  h1::before{content:"$ ";color:var(--green-dim)}
+ h2{margin:0 0 .8rem;font-size:.85rem;color:var(--cyan);font-weight:600}
  .sub{color:var(--mute);font-size:.76rem;margin-bottom:1.2rem}
  .state{display:flex;align-items:center;gap:.6rem;padding:.8rem .95rem;border-radius:8px;
         background:var(--bg2);border:1px solid var(--border);margin-bottom:1rem;font-size:.85rem}
@@ -184,7 +366,18 @@ PAGE = """<!doctype html>
  input[type=text]:focus{outline:none;border-color:var(--green-dim)}
  input[type=checkbox]{accent-color:var(--green)}
  .err{color:#ff9a94;font-size:.76rem;margin-top:.7rem;white-space:pre-wrap}
+ .slots{display:grid;grid-template-columns:1fr 1fr;gap:.9rem}
+ @media (max-width:520px){.slots{grid-template-columns:1fr}}
+ .slot-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.9rem;font-size:.82rem}
+ .slot-card h3{margin:0 0 .5rem;font-size:.8rem;color:var(--dim);font-weight:600;letter-spacing:.5px}
+ .who{font-size:.72rem;color:var(--mute);margin-top:.3rem;word-break:break-all}
+ .cred{font-size:.72rem;color:var(--amber);margin-top:.4rem;word-break:break-all}
+ .g-signin{display:flex;justify-content:center;margin-bottom:.6rem}
+ .signed-in{display:flex;justify-content:space-between;align-items:center;font-size:.78rem;color:var(--dim);margin-bottom:.6rem}
+ .signed-in button{flex:none;min-width:auto;padding:.35rem .7rem;font-size:.72rem}
+ .disabled-note{font-size:.76rem;color:var(--mute);text-align:center;padding:1rem 0}
 </style>
+
 <div class="card">
   <div class="bar-top"><i></i><i></i><i></i></div>
   <h1>cloud-desktop</h1>
@@ -214,6 +407,23 @@ PAGE = """<!doctype html>
 
   <div id="err" class="err"></div>
 </div>
+
+<div class="card">
+  <h2>Guest desktops</h2>
+  <div class="sub">Sign in with Google, get your own desktop. Two can run at once; each session auto-ends after its time limit.</div>
+
+  <div id="g-anon" class="g-signin"></div>
+  <div id="g-signed" class="signed-in" style="display:none">
+    <span id="g-email"></span>
+    <button id="g-signout">Sign out</button>
+  </div>
+  <div id="g-disabled" class="disabled-note" style="display:none">Sign-in is not configured yet.</div>
+
+  <div id="g-slots" class="slots"></div>
+  <div id="g-err" class="err"></div>
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 const $=i=>document.getElementById(i);
 let busy=null, t0=0;
@@ -269,6 +479,7 @@ async function poll(){
     if(busy==='start'&&s.desktop_up){busy=null;location.href=s.desktop_url||'/'}
     if(busy==='destroy'&&!s.desktop_up&&s.run&&s.run.status==='completed'){busy=null}
     render(s);
+    renderGuest(s);
   }catch(e){
     // A poll that dies must not leave the UI stuck mid-action.
     busy=null;
@@ -292,60 +503,295 @@ async function go(action){
 }
 $('start').onclick=()=>go('start');
 $('destroy').onclick=()=>go('destroy');
+
+// ---------------- guest section ----------------
+let session=null, guestBusy={};
+
+function renderGuest(s){
+  if(s.google_client_id && !window.__gRendered){
+    window.__gRendered=true;
+    google.accounts.id.initialize({client_id:s.google_client_id, callback:onGoogleCredential});
+    google.accounts.id.renderButton($('g-anon'), {theme:'filled_black', size:'large'});
+  }
+  $('g-disabled').style.display = s.google_client_id ? 'none' : 'block';
+
+  session = s.session || null;
+  $('g-anon').style.display = session ? 'none' : (s.google_client_id ? 'flex' : 'none');
+  $('g-signed').style.display = session ? 'flex' : 'none';
+  if(session) $('g-email').textContent = session.email;
+
+  const grid=$('g-slots'); grid.innerHTML='';
+  for(const name of ['a','b']){
+    const slot=(s.slots||{})[name]||{status:'idle'};
+    const mine = session && slot.user_id===session.user_id;
+    const div=document.createElement('div'); div.className='slot-card';
+    let body=`<h3>SLOT ${name.toUpperCase()}</h3>`;
+    if(slot.status==='idle'||slot.status==='error'){
+      body+=`<div>Free</div>`;
+      body+=`<div class="row" style="margin-top:.6rem">
+        <button class="go" ${session?'':'disabled'} onclick="guestStart('${name}')">Start here</button>
+      </div>
+      <label style="margin-top:.5rem"><input type="checkbox" id="persist-${name}"> Keep my data after destroy</label>`;
+    } else if(slot.status==='pending'){
+      body+=`<div class="dot work" style="display:inline-block;margin-right:.4rem"></div>Starting…`;
+    } else if(slot.status==='ready'||slot.status==='active'){
+      body+=`<div>${slot.status==='active'?'Running':'Booting…'}</div>`;
+      body+=`<div class="who">${slot.email||''}</div>`;
+      if(mine && slot.password) body+=`<div class="cred">pass: ${slot.password}</div>`;
+      if(slot.url) body+=`<a class="open on" href="${slot.url}" target="_blank">Open →</a>`;
+      if(mine || (session&&session.is_admin)){
+        body+=`<div class="row" style="margin-top:.6rem"><button class="stop" onclick="guestDestroy('${name}')">Destroy</button></div>`;
+      }
+    }
+    div.innerHTML=body; grid.appendChild(div);
+  }
+}
+
+function onGoogleCredential(resp){
+  fetch('api/google-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential:resp.credential})})
+    .then(r=>{ if(!r.ok) throw new Error('sign-in rejected'); return r.json() })
+    .catch(e=>{$('g-err').textContent=e.message});
+}
+$('g-signout').onclick=()=>fetch('api/google-logout',{method:'POST'});
+
+window.guestStart=(slot)=>{
+  $('g-err').textContent='';
+  const persist=$('persist-'+slot)?.checked||false;
+  fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start',slot,persist})})
+    .then(async r=>{ if(!r.ok) $('g-err').textContent=await r.text() });
+};
+window.guestDestroy=(slot)=>{
+  if(!confirm('Destroy this desktop?'))return;
+  $('g-err').textContent='';
+  fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'destroy',slot})})
+    .then(async r=>{ if(!r.ok) $('g-err').textContent=await r.text() });
+};
+
 poll();setInterval(poll,5000);
 </script>
 """
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", set_cookie=None):
         raw = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(raw)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
         self.end_headers()
         self.wfile.write(raw)
+
+    def _session(self):
+        raw = self.headers.get("Cookie", "")
+        jar = http.cookies.SimpleCookie()
+        try:
+            jar.load(raw)
+        except Exception:
+            return None
+        morsel = jar.get("session")
+        if not morsel:
+            return None
+        payload = verify_session(morsel.value)
+        if payload:
+            payload["is_admin"] = bool(ADMIN_GOOGLE_SUB) and payload.get("sub") == ADMIN_GOOGLE_SUB
+        return payload
+
+    def _bearer_ok(self, expected):
+        auth = self.headers.get("Authorization", "")
+        if not expected:
+            return False
+        return hmac.compare_digest(auth, f"Bearer {expected}")
 
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/")
         if path in ("", "/index.html"):
             return self._send(200, PAGE, "text/html; charset=utf-8")
+
         if path == "/api/status":
-            out = {"desktop_up": desktop_up(), "run": latest_run(), "desktop_url": DESKTOP_URL,
-                   "hourly_usd": HOURLY_USD}
+            session = self._session()
+            slots = refresh_slots(_load_slots())
+            public_slots = {}
+            for name, s in slots.items():
+                entry = {"status": s.get("status", "idle")}
+                if s.get("status") in ("pending", "ready", "active"):
+                    entry["user_id"] = s.get("user_id")
+                    entry["email"] = s.get("email")
+                    entry["url"] = s.get("url")
+                    entry["status"] = s.get("status")
+                    # Password only ever goes to the owning session, or the
+                    # admin - never broadcast to every visitor polling status.
+                    if session and (session.get("user_id") == s.get("user_id") or session.get("is_admin")):
+                        entry["password"] = s.get("password")
+                public_slots[name] = entry
+
+            out = {
+                "desktop_up": desktop_up(),
+                "run": latest_run(),
+                "desktop_url": DESKTOP_URL,
+                "hourly_usd": HOURLY_USD,
+                "google_client_id": GOOGLE_CLIENT_ID,
+                "session": session,
+                "slots": public_slots,
+            }
             if not token():
                 out["error"] = ("No GitHub token on the hub. Buttons are inert until "
                                 "/etc/hub/github-token contains a fine-grained PAT with "
                                 "Actions: read and write on this repo.")
             return self._send(200, json.dumps(out))
+
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
-        if self.path.split("?")[0].rstrip("/") != "/api/dispatch":
-            return self._send(404, json.dumps({"error": "not found"}))
+        path = self.path.split("?")[0].rstrip("/")
+
         try:
             n = int(self.headers.get("Content-Length") or 0)
             req = json.loads(self.rfile.read(n) or b"{}")
         except Exception as exc:
             return self._send(400, json.dumps({"error": f"bad json: {exc}"}))
 
-        wf = WORKFLOWS.get(req.get("action"))
+        if path == "/api/google-login":
+            return self._google_login(req)
+        if path == "/api/google-logout":
+            return self._send(200, json.dumps({"ok": True}),
+                               set_cookie="session=; Path=/control; Max-Age=0")
+        if path == "/api/session-ready":
+            return self._session_ready(req)
+        if path == "/api/session-ended":
+            return self._session_ended(req)
+        if path == "/api/dispatch":
+            return self._dispatch(req)
+
+        return self._send(404, json.dumps({"error": "not found"}))
+
+    # -- Google sign-in ----------------------------------------------------
+
+    def _google_login(self, req):
+        if not GOOGLE_CLIENT_ID or not SESSION_SECRET:
+            return self._send(400, json.dumps({"error": "sign-in is not configured on this hub"}))
+        claims = verify_google_token(req.get("credential", ""))
+        if not claims:
+            return self._send(401, json.dumps({"error": "google rejected that token"}))
+
+        email = claims.get("email", "")
+        sub = claims.get("sub", "")
+        uid = user_id_from(email, sub)
+        payload = {
+            "sub": sub,
+            "email": email,
+            "user_id": uid,
+            "exp": time.time() + SESSION_MAX_AGE,
+        }
+        cookie = sign_session(payload)
+        return self._send(
+            200, json.dumps({"user_id": uid, "email": email}),
+            set_cookie=f"session={cookie}; Path=/control; HttpOnly; Secure; SameSite=Lax; Max-Age={SESSION_MAX_AGE}",
+        )
+
+    # -- Callbacks from GitHub Actions (shared secret, not a session) ------
+
+    def _session_ready(self, req):
+        if not self._bearer_ok(HUB_CALLBACK_SECRET):
+            return self._send(403, json.dumps({"error": "bad callback secret"}))
+        slot = req.get("slot")
+        if slot not in SLOTS:
+            return self._send(400, json.dumps({"error": "bad slot"}))
+        slots = _load_slots()
+        prior = slots.get(slot, {})
+        slots[slot] = {
+            "status": "ready",  # control panel still polls healthz before "active"
+            "user_id": prior.get("user_id"),
+            "email": prior.get("email"),
+            "url": req.get("url"),
+            "password": req.get("password"),
+            "kill_at": req.get("kill_at"),
+            "started_at": time.time(),
+        }
+        _save_slots(slots)
+        return self._send(200, json.dumps({"ok": True}))
+
+    def _session_ended(self, req):
+        if not self._bearer_ok(HUB_CALLBACK_SECRET):
+            return self._send(403, json.dumps({"error": "bad callback secret"}))
+        slot = req.get("slot")
+        if slot not in SLOTS:
+            return self._send(400, json.dumps({"error": "bad slot"}))
+        slots = _load_slots()
+        slots[slot] = {"status": "idle"}
+        _save_slots(slots)
+        return self._send(200, json.dumps({"ok": True}))
+
+    # -- Start / destroy -----------------------------------------------------
+
+    def _dispatch(self, req):
+        action = req.get("action")
+        wf = WORKFLOWS.get(action)
         if not wf:
             return self._send(400, json.dumps({"error": "unknown action"}))
 
-        if req["action"] == "start":
-            # No password here on purpose. workflow_dispatch inputs are not
-            # masked in job logs, and this repository is public - passing one
-            # would publish it. The password is generated by Terraform.
-            inputs = {
-                "username": str(req.get("username") or "mnour"),
-                "fresh": "true" if req.get("fresh") else "false",
-            }
-        else:
-            inputs = {"confirm": "DESTROY"}
+        slot = req.get("slot")
+        if slot is None:
+            # The owner's original, unchanged path - no slot, no session
+            # required. Basic auth in front of the whole hub is the gate.
+            if action == "start":
+                inputs = {
+                    "username": str(req.get("username") or "mnour"),
+                    "fresh": "true" if req.get("fresh") else "false",
+                }
+            else:
+                inputs = {"confirm": "DESTROY"}
+            return self._trigger(wf, inputs)
 
+        # Guest path - requires a real session from here on.
+        if slot not in SLOTS:
+            return self._send(400, json.dumps({"error": "bad slot"}))
+        session = self._session()
+        if not session:
+            return self._send(401, json.dumps({"error": "sign in first"}))
+
+        slots = _load_slots()
+        current = slots.get(slot, {"status": "idle"})
+
+        if action == "start":
+            if current.get("status") not in ("idle", "error"):
+                return self._send(409, json.dumps({"error": "that slot is in use"}))
+            # One running slot per guest - stops a single sign-in from
+            # occupying both, which would otherwise defeat the 2-slot cap.
+            for name, s in slots.items():
+                if s.get("user_id") == session["user_id"] and s.get("status") in ("pending", "ready", "active"):
+                    return self._send(409, json.dumps({"error": "you already have a desktop running"}))
+
+            slots[slot] = {
+                "status": "pending",
+                "user_id": session["user_id"],
+                "email": session["email"],
+                "dispatched_at": time.time(),
+            }
+            _save_slots(slots)
+            inputs = {
+                "username": session["user_id"],
+                "fresh": "false",
+                "slot": slot,
+                "user_id": session["user_id"],
+                "owner_email": session["email"],
+                "persist": "true" if req.get("persist") else "false",
+                "session_hours": "4",
+            }
+            return self._trigger(wf, inputs)
+
+        if action == "destroy":
+            owns_it = current.get("user_id") == session["user_id"]
+            if not (owns_it or session.get("is_admin")):
+                return self._send(403, json.dumps({"error": "not your session"}))
+            return self._trigger(wf, {"confirm": "DESTROY", "slot": slot})
+
+        return self._send(400, json.dumps({"error": "unknown action"}))
+
+    def _trigger(self, workflow_file, inputs):
         try:
-            gh("POST", f"/repos/{REPO}/actions/workflows/{wf}/dispatches",
+            gh("POST", f"/repos/{REPO}/actions/workflows/{workflow_file}/dispatches",
                {"ref": "main", "inputs": inputs})
         except urllib.error.HTTPError as exc:
             return self._send(exc.code, json.dumps({"error": exc.read().decode()[:400]}))
@@ -358,4 +804,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if not SESSION_SECRET:
+        print("WARNING: SESSION_SECRET is not set - guest sign-in will fail closed (no crash, just rejected).")
     ThreadingHTTPServer(LISTEN, Handler).serve_forever()

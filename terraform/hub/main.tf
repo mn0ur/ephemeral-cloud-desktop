@@ -57,9 +57,20 @@ variable "name" {
 }
 
 variable "instance_type" {
-  description = "ARM Graviton. 1GB is enough for Uptime Kuma + Homepage + Caddy; bump to t4g.small if it gets tight."
+  description = <<-EOT
+    ARM Graviton. 1GB (t4g.micro) is enough for Uptime Kuma + Homepage +
+    Caddy, but on 2026-08-09 eu-central-1a had no t4g.micro capacity at all -
+    RunInstances failed with InsufficientInstanceCapacity after 25 retries
+    over ~2 hours, taking the hub offline for that whole window.
+
+    Defaulting to t4g.small now - not for the extra RAM, but because it
+    happened to have capacity when t4g.micro did not. If this ever recurs,
+    try a different size in the same family before changing AZ; the AZ is
+    fixed by aws_ebs_volume.data, which cannot move without a snapshot
+    restore.
+  EOT
   type        = string
-  default     = "t4g.micro"
+  default     = "t4g.small"
 }
 
 variable "hostname" {
@@ -102,6 +113,36 @@ variable "monitor_targets" {
     "https://whasal.com",
     "https://mnour.sd",
   ]
+}
+
+# ---------------------------------------------------------------------------
+# Guest self-service: Google sign-in, and the shared secret GitHub Actions
+# uses to hand a finished session's URL/password back to this box.
+# ---------------------------------------------------------------------------
+
+variable "google_client_id" {
+  description = <<-EOT
+    OAuth Client ID from Google Cloud Console (Credentials > Create Client >
+    Web application, Authorized JavaScript origin https://hub.mnour.sd).
+
+    Empty (default) is a deliberate, safe state: the control panel detects
+    this and shows "sign-in not configured" instead of a broken button,
+    rather than failing at startup for a feature that has not been set up.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "admin_google_sub" {
+  description = <<-EOT
+    The owner's own Google account ID ("sub" claim), so the control panel can
+    tell "the owner" apart from "a guest" and let the owner destroy either
+    slot rather than only their own. Empty means no admin override exists yet
+    - guests can still only destroy their own slot, which is the safe default.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 locals {
@@ -223,6 +264,25 @@ resource "random_password" "dashboard" {
   special = false
 }
 
+# Signs the control panel's session cookies. Generated here rather than
+# typed by hand, and it never leaves this box - unlike hub_callback_secret
+# below, GitHub Actions has no need to know it.
+resource "random_password" "session_secret" {
+  length  = 48
+  special = false
+}
+
+# The shared secret GitHub Actions presents when it POSTs a finished guest
+# session's URL and password to /control/api/session-ready, and when it
+# reports a slot freeing up to /control/api/session-ended. Generated here so
+# it is never typed by hand, but it DOES have to be copied once into
+# Settings > Secrets and variables > Actions as HUB_CALLBACK_SECRET - a
+# shared secret is only useful if both sides hold the same value.
+resource "random_password" "hub_callback_secret" {
+  length  = 40
+  special = false
+}
+
 resource "aws_key_pair" "hub" {
   key_name   = "${var.name}-key"
   public_key = trimspace(file("${path.module}/${var.ssh_public_key_path}"))
@@ -250,10 +310,14 @@ resource "aws_instance" "hub" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user-data.sh.tpl", {
-    hostname           = var.hostname
-    dashboard_password = random_password.dashboard.result
-    tailscale_auth_key = var.tailscale_auth_key
-    monitor_targets    = join(",", var.monitor_targets)
+    hostname            = var.hostname
+    dashboard_password  = random_password.dashboard.result
+    tailscale_auth_key  = var.tailscale_auth_key
+    monitor_targets     = join(",", var.monitor_targets)
+    google_client_id    = var.google_client_id
+    admin_google_sub    = var.admin_google_sub
+    session_secret      = random_password.session_secret.result
+    hub_callback_secret = random_password.hub_callback_secret.result
   })
 
   root_block_device {
@@ -315,6 +379,12 @@ output "instance_id" {
 output "dashboard_password" {
   description = "Basic auth password for the hub."
   value       = random_password.dashboard.result
+  sensitive   = true
+}
+
+output "hub_callback_secret" {
+  description = "Copy this into Settings > Secrets and variables > Actions as HUB_CALLBACK_SECRET - the workflows and the hub must agree on the same value."
+  value       = random_password.hub_callback_secret.result
   sensitive   = true
 }
 

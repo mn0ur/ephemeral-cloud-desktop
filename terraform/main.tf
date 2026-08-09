@@ -16,28 +16,42 @@ data "terraform_remote_state" "persistent" {
 }
 
 locals {
-  account_id  = data.aws_caller_identity.current.account_id
+  account_id = data.aws_caller_identity.current.account_id
+
+  # Empty slot ("") is the owner's own desktop and reproduces every name
+  # exactly as it was before slots existed - project, display and hostname
+  # all unchanged, so this apply is a no-op diff for the resources that
+  # already exist. A guest slot ("a" / "b") gets its own suffix everywhere a
+  # name has to be account-unique, which IAM role and key pair names are -
+  # two slots applying at once would otherwise race to create the same
+  # "mnour-desktop-instance" role.
+  slot_suffix = var.slot == "" ? "" : "-${var.slot}"
+  name        = "${var.project}${local.slot_suffix}"
+  display     = "mnour-desktop${local.slot_suffix}"
   data_bucket = "${var.project}-${local.account_id}-data"
-  name        = var.project
+
+  effective_hostname = var.slot == "" ? var.hostname : "desk-${var.slot}.${var.cloudflare_zone}"
 
   # Must match terraform/persistent, which derives its AZ identically. An EBS
   # volume can only attach to an instance in the same availability zone, so
   # these two stacks have to agree without manual coordination.
   az = "${var.region}a"
 
-  # Display name for tags only. local.name still builds security group, key
-  # pair and IAM names - renaming those would force replacements.
-  display = "mnour-desktop"
-
   # Explicit password when supplied, generated otherwise. Lets a desktop be
   # handed to someone else with credentials you choose, without weakening the
-  # default - which stays a generated 32-character secret.
+  # default - which stays a generated 32-character secret. Guest sessions
+  # always supply one (the workflow generates it), so the owner's own
+  # persistent-stack password is never shared with a guest.
   web_password = var.web_password_override != "" ? var.web_password_override : data.terraform_remote_state.persistent.outputs.desktop_admin_password
 }
 
-# The persistent /config volume, created by the terraform/persistent stack and
-# deliberately NOT managed here - destroying the desktop must never remove it.
+# The owner's own persistent /config volume, created by terraform/persistent
+# and deliberately NOT managed here - destroying the desktop must never
+# remove it. Only looked up for the owner's own desktop (slot == ""); guests
+# get a separate, per-guest volume below instead.
 data "aws_ebs_volume" "data" {
+  count = var.slot == "" ? 1 : 0
+
   most_recent = true
 
   # Keyed on Role, NOT Name. Looking up by display name coupled this stack to
@@ -280,7 +294,7 @@ resource "aws_instance" "desktop" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user-data.sh.tpl", {
-    hostname     = var.hostname
+    hostname     = local.effective_hostname
     image        = var.image
     timezone     = var.timezone
     web_user     = var.web_user
@@ -316,18 +330,41 @@ resource "aws_instance" "desktop" {
     }
   }
 
-  tags = { Name = local.display }
+  # Owner/Slot/KillAt only exist on guest instances - the owner's own
+  # desktop keeps exactly the tag set it always had. KillAt is what the
+  # desktop-reaper workflow reads to force-destroy a forgotten session.
+  tags = merge(
+    { Name = local.display },
+    var.slot != "" ? { Owner = var.user_id, Slot = var.slot, OwnerEmail = var.owner_email } : {},
+    var.kill_at != "" ? { KillAt = var.kill_at } : {},
+  )
 }
 
-# Attach the persistent volume. Destroying the desktop detaches it; the volume
-# itself survives in the persistent stack.
+# Attach the owner's own persistent volume. Destroying the desktop detaches
+# it; the volume itself survives in the persistent stack. Guests never touch
+# this - see aws_volume_attachment.guest_data below.
 resource "aws_volume_attachment" "data" {
+  count = var.slot == "" ? 1 : 0
+
   device_name = "/dev/sdf"
-  volume_id   = data.aws_ebs_volume.data.id
+  volume_id   = data.aws_ebs_volume.data[0].id
   instance_id = aws_instance.desktop.id
 
   # Let terraform destroy detach even if the OS still has it mounted. Without
   # this a destroy can hang waiting for a graceful detach that never comes.
+  force_detach = true
+}
+
+# A guest's own volume, created (or found) by the workflow via the AWS CLI
+# before this apply runs - see docs on var.user_volume_id for why that has to
+# happen outside Terraform. Empty means the guest chose not to keep their
+# data: nothing is attached, root disk only, gone completely on destroy.
+resource "aws_volume_attachment" "guest_data" {
+  count = var.slot != "" && var.user_volume_id != "" ? 1 : 0
+
+  device_name  = "/dev/sdf"
+  volume_id    = var.user_volume_id
+  instance_id  = aws_instance.desktop.id
   force_detach = true
 }
 
@@ -350,7 +387,7 @@ resource "aws_volume_attachment" "data" {
 # ---------------------------------------------------------------------------
 resource "null_resource" "dns" {
   triggers = {
-    fqdn = var.hostname
+    fqdn = local.effective_hostname
     ip   = aws_instance.desktop.public_ip
     # Destroy-time provisioners may only reference self.triggers, so the
     # script path and parked address have to live here too.

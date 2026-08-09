@@ -7,12 +7,18 @@ on:
         description: 'Type DESTROY to confirm'
         required: true
         default: ""
+      slot:
+        description: "\"\" for the owner's own desktop, or \"a\"/\"b\" for a guest slot."
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-lifecycle
+  # Must match the formula in desktop-up.yml exactly, or a slot-a destroy
+  # could race a slot-a start while leaving slot-b free to run in parallel.
+  group: desktop-lifecycle-${{ inputs.slot }}
   cancel-in-progress: false
 
 jobs:
@@ -51,12 +57,34 @@ jobs:
       # Only the desktop stack. The persistent volume lives in
       # terraform/persistent and the monitoring box in terraform/hub - neither
       # is touched here, which is the entire reason they are separate stacks.
+      # A guest's own data volume (terraform/main.tf's guest_data attachment)
+      # is likewise never destroyed here - only detached, same as the owner's.
       - name: terraform destroy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_slot: ${{ inputs.slot }}
         run: |
-          terraform -chdir=terraform init -input=false
+          KEY="desktop/terraform.tfstate"
+          if [ -n "${{ inputs.slot }}" ]; then
+            KEY="desktop/slot-${{ inputs.slot }}/terraform.tfstate"
+          fi
+          terraform -chdir=terraform init -input=false -backend-config="key=$KEY"
           terraform -chdir=terraform destroy -auto-approve -input=false
+
+      - name: Tell the hub this slot is free
+        if: inputs.slot != ''
+        env:
+          HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+        run: |
+          if [ -z "$HUB_CALLBACK_SECRET" ]; then
+            echo "::warning::HUB_CALLBACK_SECRET not set - the control panel will not learn this slot freed up until its next status poll notices /healthz stopped answering."
+            exit 0
+          fi
+          curl -fsS -X POST "https://hub.mnour.sd/control/api/session-ended" \
+            -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"slot\":\"${{ inputs.slot }}\"}" \
+            || echo "::warning::callback to hub failed - non-fatal, destroy already succeeded"
 
       - name: Confirm nothing billable is left
         run: |

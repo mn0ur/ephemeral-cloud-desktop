@@ -200,6 +200,14 @@ curl -fsSL https://raw.githubusercontent.com/mn0ur/ephemeral-cloud-desktop/main/
   -o /opt/hub/control.py || echo "WARNING: could not fetch control panel"
 chmod 755 /opt/hub/control.py 2>/dev/null || true
 
+cat >/etc/hub/control.env <<ENVFILE
+GOOGLE_CLIENT_ID=${google_client_id}
+ADMIN_GOOGLE_SUB=${admin_google_sub}
+SESSION_SECRET=${session_secret}
+HUB_CALLBACK_SECRET=${hub_callback_secret}
+ENVFILE
+chmod 600 /etc/hub/control.env
+
 cat >/etc/systemd/system/hub-control.service <<'UNIT'
 [Unit]
 Description=Hub desktop control panel
@@ -208,6 +216,7 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/hub/control.py
+EnvironmentFile=/etc/hub/control.env
 Restart=always
 RestartSec=5
 User=root

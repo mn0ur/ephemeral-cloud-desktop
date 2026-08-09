@@ -4,7 +4,7 @@ A full Linux desktop in the browser, provisioned on AWS with Terraform. One
 click up, one click down. Installed software, files and browser sessions
 survive teardown. When it is down it costs about **$1.90/month**.
 
-Live at `desk.mnour.sd`, controlled from `hub.mnour.sd/control`.
+Live at `desk.mnour.dev`, controlled from `hub.mnour.dev/control`.
 
 ## Why this exists
 
@@ -147,8 +147,11 @@ Stated plainly rather than omitted.
 
 - **The desktop is internet-facing.** The security group allows 80 and 443 from
   `0.0.0.0/0`; Caddy basic auth is the only barrier, and the container has
-  passwordless `sudo`. Cloudflare Access is the intended fix and is **blocked** —
-  the account role is *Limited Account-Level Access* and cannot enable Zero Trust.
+  passwordless `sudo`. Cloudflare Access is the intended fix. It was blocked
+  while this lived on `mnour.sd`, whose account role is *Limited
+  Account-Level Access* - Access moved with the hostname to `mnour.dev`,
+  the owner's own, fully-administered account, specifically to unblock this.
+  Not yet configured as of this move; still open.
 - **GitHub Actions uses static AWS keys.** OIDC is the intended design and needs
   `iam:CreateRole`, which this IAM user is denied. The scoped policy is written
   and ready at `docs/aws-permissions-policy.json`, awaiting an account admin.

@@ -80,7 +80,7 @@ jobs:
             echo "::warning::HUB_CALLBACK_SECRET not set - the control panel will not learn this slot freed up until its next status poll notices /healthz stopped answering."
             exit 0
           fi
-          curl -fsS -X POST "https://hub.mnour.sd/control/api/session-ended" \
+          curl -fsS -X POST "https://hub.mnour.dev/control/api/session-ended" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "{\"slot\":\"${{ inputs.slot }}\"}" \

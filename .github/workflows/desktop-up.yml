@@ -172,7 +172,7 @@ jobs:
             --arg password "$PASSWORD" \
             --arg kill_at "${KILL_AT:-}" \
             '{slot:$slot, user_id:$user_id, url:$url, password:$password, kill_at:$kill_at}')
-          curl -fsS -X POST "https://hub.mnour.sd/control/api/session-ready" \
+          curl -fsS -X POST "https://hub.mnour.dev/control/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"

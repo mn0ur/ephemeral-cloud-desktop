@@ -5,7 +5,7 @@
 // mean `terraform destroy` on the desktop takes the monitoring with it.
 //
 // Deliberately holds NO AWS credentials. Desktop status is inferred by
-// Uptime Kuma probing https://desktop.mnour.sd rather than by calling the EC2
+// Uptime Kuma probing https://desk.mnour.dev rather than by calling the EC2
 // API, and start/destroy actions are links to GitHub Actions. An always-on
 // internet-facing box with keys to the account is exactly what we avoid.
 
@@ -75,12 +75,14 @@ variable "instance_type" {
 
 variable "hostname" {
   type    = string
-  default = "hub.mnour.sd"
+  default = "hub.mnour.dev"
 }
 
 variable "cloudflare_zone" {
+  # mnour.dev, not mnour.sd - see terraform/variables.tf for why. This zone
+  # is in the owner's own account, so Access can actually be enabled here.
   type    = string
-  default = "mnour.sd"
+  default = "mnour.dev"
 }
 
 variable "ssh_public_key_path" {
@@ -94,7 +96,7 @@ variable "tailscale_auth_key" {
     Reusable Tailscale auth key. Leave empty to skip Tailscale entirely.
 
     Without it the hub can still monitor PUBLIC endpoints (the desktop,
-    whasal.com, mnour.sd) but cannot reach 192.168.1.x, so it cannot monitor
+    whasal.com, mnour.dev) but cannot reach 192.168.1.x, so it cannot monitor
     the home lab - which is the blind spot this box exists to fix.
 
     Generate at https://login.tailscale.com/admin/settings/keys and pass via
@@ -109,9 +111,9 @@ variable "monitor_targets" {
   description = "Seeded into Uptime Kuma's setup notes. Public endpoints need no Tailscale; 192.168.x ones do."
   type        = list(string)
   default = [
-    "https://desktop.mnour.sd",
+    "https://desk.mnour.dev", # was desktop.mnour.sd - stale since the desktop's own rename
     "https://whasal.com",
-    "https://mnour.sd",
+    "https://mnour.dev",
   ]
 }
 
@@ -123,7 +125,7 @@ variable "monitor_targets" {
 variable "google_client_id" {
   description = <<-EOT
     OAuth Client ID from Google Cloud Console (Credentials > Create Client >
-    Web application, Authorized JavaScript origin https://hub.mnour.sd).
+    Web application, Authorized JavaScript origin https://hub.mnour.dev).
 
     Empty (default) is a deliberate, safe state: the control panel detects
     this and shows "sign-in not configured" instead of a broken button,

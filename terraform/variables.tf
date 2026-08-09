@@ -46,13 +46,22 @@ variable "root_volume_gb" {
 variable "hostname" {
   description = "Public hostname served by Caddy with automatic TLS."
   type        = string
-  default     = "desk.mnour.sd"
+  default     = "desk.mnour.dev"
 }
 
 variable "cloudflare_zone" {
-  description = "Cloudflare zone the hostname belongs to."
+  description = <<-EOT
+    Cloudflare zone the hostname belongs to.
+
+    mnour.dev, not mnour.sd - moved 2026-08-09. mnour.sd's zone sits in the
+    "Penstash Account", where this project's role is Limited Account-Level
+    Access, which cannot enable Cloudflare Access / Zero Trust. mnour.dev is
+    in the owner's own, fully-administered account, which is the entire
+    reason for the move - the desktop is internet-facing behind nothing but
+    Caddy basic auth today, and Access is how that gets fixed.
+  EOT
   type        = string
-  default     = "mnour.sd"
+  default     = "mnour.dev"
 }
 
 variable "enable_instance_role" {

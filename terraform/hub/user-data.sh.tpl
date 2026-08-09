@@ -104,9 +104,9 @@ cat >"$PERSIST/homepage/config/services.yaml" <<'YAML'
         href: /control/
         description: Start / destroy with live progress, then auto-open the desktop
     - Desktop STATUS:
-        href: https://desktop.mnour.sd
+        href: https://desk.mnour.dev
         description: Green = running. Red = destroyed, costing nothing.
-        siteMonitor: https://desktop.mnour.sd/healthz
+        siteMonitor: https://desk.mnour.dev/healthz
         statusStyle: dot
     - Workflows:
         href: https://github.com/mn0ur/ephemeral-cloud-desktop/actions
@@ -131,8 +131,8 @@ cat >"$PERSIST/homepage/config/services.yaml" <<'YAML'
         siteMonitor: https://whasal.com
         statusStyle: dot
     - Portfolio:
-        href: https://mnour.sd
-        siteMonitor: https://mnour.sd
+        href: https://mnour.dev
+        siteMonitor: https://mnour.dev
         statusStyle: dot
     - Uptime Kuma (here):
         href: /kuma/

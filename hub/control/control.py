@@ -33,6 +33,10 @@ TOKEN_FILE = os.environ.get("GH_TOKEN_FILE", "/etc/hub/github-token")
 DESKTOP_URL = os.environ.get("DESKTOP_URL", "https://desk.mnour.sd")
 LISTEN = ("127.0.0.1", 8000)
 
+# Measured spot price for c7i.xlarge in eu-central-1. Used only to show a
+# running estimate - the authoritative number is always the AWS bill.
+HOURLY_USD = float(os.environ.get("HOURLY_USD", "0.104"))
+
 # Fixed allow-list. Never build a workflow filename from request input.
 WORKFLOWS = {
     "start": "desktop-up.yml",
@@ -107,43 +111,71 @@ PAGE = """<!doctype html>
 <base href="/control/">
 <title>Desktop Control</title>
 <style>
- :root{color-scheme:dark}
- body{margin:0;font:15px/1.5 system-ui,sans-serif;background:#0f1420;color:#e6edf7;
-      display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
- .card{width:100%;max-width:620px;background:#161c2b;border:1px solid #263048;
-       border-radius:14px;padding:1.6rem}
- h1{margin:0 0 .3rem;font-size:1.25rem}
- .sub{color:#8fa0bd;font-size:.85rem;margin-bottom:1.3rem}
- .state{display:flex;align-items:center;gap:.6rem;padding:.85rem 1rem;border-radius:10px;
-        background:#0f1626;border:1px solid #263048;margin-bottom:1.1rem}
- .dot{width:11px;height:11px;border-radius:50%;background:#64748b;flex:none}
- .dot.up{background:#22c55e;box-shadow:0 0 10px #22c55e}
- .dot.down{background:#ef4444}
- .dot.work{background:#f59e0b;animation:p 1s infinite}
- @keyframes p{50%{opacity:.3}}
- .bar{height:7px;background:#0b1120;border-radius:99px;overflow:hidden;margin:.9rem 0 .4rem;display:none}
+ /* Tokens copied verbatim from mnour.sd (devops-portfolio/css/style.css) so
+    the dashboard, the control panel and the portfolio read as one system. */
+ :root{
+   --bg:#04070c; --bg2:#070d16; --panel:#0a121e; --panel2:#0d1726;
+   --border:#16283c; --border-hi:#1f3a55;
+   --green:#3dffa2; --green-dim:#17a866; --cyan:#56d4ff; --amber:#ffc46b;
+   --red:#ff5f56; --text:#c9d7e6; --dim:#64788f; --mute:#3d4f63;
+   --mono:"JetBrains Mono","Fira Code",Consolas,"Courier New",monospace;
+   --glow:0 0 12px rgba(61,255,162,.45); --radius:10px;
+   color-scheme:dark;
+ }
+ *{box-sizing:border-box}
+ body{margin:0;font:14px/1.6 var(--mono);background:var(--bg);color:var(--text);
+      display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem;
+      background-image:linear-gradient(rgba(22,40,60,.25) 1px,transparent 1px),
+                       linear-gradient(90deg,rgba(22,40,60,.25) 1px,transparent 1px);
+      background-size:44px 44px}
+ .card{width:100%;max-width:640px;background:var(--panel);border:1px solid var(--border);
+       border-radius:var(--radius);padding:1.5rem;box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+ .bar-top{display:flex;gap:.45rem;margin-bottom:1.1rem}
+ .bar-top i{width:11px;height:11px;border-radius:50%;display:block}
+ .bar-top i:nth-child(1){background:var(--red)}
+ .bar-top i:nth-child(2){background:var(--amber)}
+ .bar-top i:nth-child(3){background:var(--green)}
+ h1{margin:0 0 .2rem;font-size:1.05rem;color:var(--green);font-weight:600;letter-spacing:.5px}
+ h1::before{content:"$ ";color:var(--green-dim)}
+ .sub{color:var(--mute);font-size:.76rem;margin-bottom:1.2rem}
+ .state{display:flex;align-items:center;gap:.6rem;padding:.8rem .95rem;border-radius:8px;
+        background:var(--bg2);border:1px solid var(--border);margin-bottom:1rem;font-size:.85rem}
+ .dot{width:10px;height:10px;border-radius:50%;background:var(--mute);flex:none}
+ .dot.up{background:var(--green);box-shadow:var(--glow)}
+ .dot.down{background:var(--red)}
+ .dot.work{background:var(--amber);animation:p 1s infinite}
+ @keyframes p{50%{opacity:.25}}
+ .bar{height:6px;background:#050b14;border:1px solid var(--border);
+      border-radius:99px;overflow:hidden;margin:.8rem 0 .35rem;display:none}
  .bar.on{display:block}
- .fill{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#22c55e);
-       transition:width .6s ease}
- .note{font-size:.8rem;color:#8fa0bd;min-height:1.2em}
- .row{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:1.1rem}
- button{flex:1;min-width:150px;padding:.75rem 1rem;border-radius:9px;border:1px solid transparent;
-        font-weight:600;font-size:.92rem;cursor:pointer}
- .go{background:#16a34a;color:#fff}
- .stop{background:#b91c1c;color:#fff}
- .open{background:#1d4ed8;color:#fff;text-decoration:none;text-align:center;
-       padding:.75rem 1rem;border-radius:9px;font-weight:600;display:none}
+ .fill{height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--green));
+       transition:width .6s ease;box-shadow:var(--glow)}
+ .note{font-size:.74rem;color:var(--mute);min-height:1.1em}
+ .row{display:flex;gap:.55rem;flex-wrap:wrap;margin-top:1rem}
+ button{flex:1;min-width:150px;padding:.7rem 1rem;border-radius:7px;cursor:pointer;
+        font-family:var(--mono);font-weight:600;font-size:.85rem;
+        background:var(--panel2);color:var(--text);border:1px solid var(--border-hi);
+        transition:border-color .15s,box-shadow .15s,color .15s}
+ .go:hover:not(:disabled){border-color:var(--green-dim);color:var(--green);box-shadow:var(--glow)}
+ .stop:hover:not(:disabled){border-color:var(--red);color:var(--red);box-shadow:0 0 12px rgba(255,95,86,.4)}
+ button:disabled{opacity:.35;cursor:not-allowed}
+ .open{display:none;margin-top:.9rem;padding:.7rem 1rem;border-radius:7px;text-align:center;
+       text-decoration:none;font-weight:600;font-size:.85rem;
+       background:var(--panel2);border:1px solid var(--green-dim);color:var(--green)}
  .open.on{display:block}
- button:disabled{opacity:.45;cursor:not-allowed}
- fieldset{border:1px solid #263048;border-radius:10px;padding:.9rem;margin:1.1rem 0 0}
- legend{color:#8fa0bd;font-size:.78rem;padding:0 .4rem}
- label{display:block;font-size:.78rem;color:#8fa0bd;margin:.5rem 0 .25rem}
- input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:.55rem .7rem;
-   border-radius:7px;border:1px solid #263048;background:#0f1626;color:#e6edf7}
- .err{color:#fca5a5;font-size:.8rem;margin-top:.7rem;white-space:pre-wrap}
+ .open:hover{box-shadow:var(--glow)}
+ fieldset{border:1px solid var(--border);border-radius:8px;padding:.85rem;margin:1rem 0 0}
+ legend{color:var(--mute);font-size:.72rem;padding:0 .4rem;text-transform:lowercase}
+ label{display:block;font-size:.74rem;color:var(--dim);margin:.45rem 0 .2rem}
+ input[type=text]{width:100%;padding:.5rem .65rem;border-radius:6px;font-family:var(--mono);
+   border:1px solid var(--border);background:var(--bg2);color:var(--text);font-size:.82rem}
+ input[type=text]:focus{outline:none;border-color:var(--green-dim)}
+ input[type=checkbox]{accent-color:var(--green)}
+ .err{color:#ff9a94;font-size:.76rem;margin-top:.7rem;white-space:pre-wrap}
 </style>
 <div class="card">
-  <h1>Cloud Desktop</h1>
+  <div class="bar-top"><i></i><i></i><i></i></div>
+  <h1>cloud-desktop</h1>
   <div class="sub" id="sub">~$0.10/hour while running &middot; data persists</div>
 
   <div class="state"><span id="dot" class="dot"></span><span id="txt">checking&hellip;</span></div>
@@ -177,12 +209,21 @@ let busy=null, t0=0;
 // answers at ~195s - the image pull and TLS happen after Terraform exits.
 const EXPECT={start:210,destroy:100}; // measured: start 195s (workflow 60s + image pull and TLS), destroy 90s
 
+function fmtDur(ms){
+  const m=Math.floor(ms/60000), h=Math.floor(m/60);
+  return h?`${h}h ${m%60}m`:`${m}m`;
+}
 function render(s){
   const up=s.desktop_up, run=s.run||{};
   const active=run.status==='queued'||run.status==='in_progress';
-  if(busy||active){
+  // A completed START with the desktop not yet answering means it is BOOTING,
+  // not destroyed. Reporting "Destroyed - costing nothing" while an instance
+  // is running and billing is the worst possible thing to get wrong here.
+  const booting = !up && !active && /START/i.test(run.name||'') && run.conclusion==='success';
+  if(busy||active||booting){
     $('dot').className='dot work';
-    $('txt').textContent=(busy==='destroy'||/DESTROY/i.test(run.name||''))?'Destroying…':'Starting…';
+    const destroying=(busy==='destroy')||(/DESTROY/i.test(run.name||'')&&busy!=='start');
+    $('txt').textContent=destroying?'Destroying…':(booting?'Booting — almost there':'Starting…');
     $('bar').classList.add('on');
     const pct=Math.min(95,((Date.now()-t0)/1000)/EXPECT[busy||'start']*100);
     $('fill').style.width=pct+'%';
@@ -191,7 +232,15 @@ function render(s){
     $('open').classList.remove('on');
   } else {
     $('dot').className='dot '+(up?'up':'down');
-    $('txt').textContent=up?'Running':'Destroyed — costing nothing';
+    if(up){
+      const started=run.started?Date.parse(run.started):null;
+      if(started){
+        const ms=Date.now()-started, cost=(ms/3600000)*(s.hourly_usd||0.104);
+        $('txt').textContent=`Running · ${fmtDur(ms)} · ~$${cost.toFixed(2)} this session`;
+      } else { $('txt').textContent='Running'; }
+    } else {
+      $('txt').textContent='Destroyed — costing nothing';
+    }
     $('start').disabled=up; $('destroy').disabled=!up;
     $('bar').classList.remove('on'); $('fill').style.width='0';
     $('note').textContent=run.conclusion?('last run: '+run.name+' → '+run.conclusion):'';
@@ -250,7 +299,8 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("", "/index.html"):
             return self._send(200, PAGE, "text/html; charset=utf-8")
         if path == "/api/status":
-            out = {"desktop_up": desktop_up(), "run": latest_run(), "desktop_url": DESKTOP_URL}
+            out = {"desktop_up": desktop_up(), "run": latest_run(), "desktop_url": DESKTOP_URL,
+                   "hourly_usd": HOURLY_USD}
             if not token():
                 out["error"] = ("No GitHub token on the hub. Buttons are inert until "
                                 "/etc/hub/github-token contains a fine-grained PAT with "

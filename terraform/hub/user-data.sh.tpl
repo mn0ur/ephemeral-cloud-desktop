@@ -194,7 +194,18 @@ docker compose -f /opt/hub/compose.yaml up -d
 # provisioned here - it is placed by hand once and survives in /etc/hub.
 # ---------------------------------------------------------------------------
 install -d -m 700 /etc/hub
-[ -f /etc/hub/github-token ] || { : > /etc/hub/github-token; chmod 600 /etc/hub/github-token; }
+
+# The token itself lives on the PERSISTENT volume, not /etc/hub - /etc/hub is
+# on the ephemeral root disk, deleted on every instance replacement. Found
+# the hard way: the first two hub replacements after this control panel was
+# built each silently wiped the token, and guest sign-in worked all the way
+# through - Google auth, slot allocation, everyone's identity correct - only
+# for the actual GitHub Actions dispatch to fail, because there was no token
+# left to make the call with. /etc/hub/github-token is now a symlink, so it
+# survives a replacement automatically once it has been placed by hand once.
+mkdir -p /mnt/hubdata/control
+[ -f /mnt/hubdata/control/github-token ] || { : > /mnt/hubdata/control/github-token; chmod 600 /mnt/hubdata/control/github-token; }
+ln -sf /mnt/hubdata/control/github-token /etc/hub/github-token
 
 curl -fsSL https://raw.githubusercontent.com/mn0ur/ephemeral-cloud-desktop/main/hub/control/control.py \
   -o /opt/hub/control.py || echo "WARNING: could not fetch control panel"
@@ -256,7 +267,16 @@ cat >/etc/caddy/Caddyfile <<'CADDY'
 __HOSTNAME__ {
 	encode zstd gzip
 
-	basic_auth {
+	# Machine-to-machine callbacks from GitHub Actions - authenticated by
+	# their own bearer secret inside control.py, never by this dashboard
+	# password. Actions has no way to supply that password, so a bare
+	# basic_auth block here would 401 every callback before control.py
+	# ever saw the request - found the hard way, on the first real guest
+	# session: Google sign-in worked, slot allocation worked, and the
+	# session-ready callback that hands back the guest's URL and password
+	# silently died at this exact wall.
+	@needs_auth not path /control/api/session-ready /control/api/session-ended
+	basic_auth @needs_auth {
 		mnour __HASH__
 	}
 

@@ -996,6 +996,18 @@ class Handler(BaseHTTPRequestHandler):
                 # a user needs to know, only that now is not the moment.
                 return self._send(503, json.dumps({"error": "all desktops are busy right now - try again shortly"}))
 
+            # Fail BEFORE marking anything pending. Marking first and
+            # discovering the dispatch cannot work afterwards is what left
+            # a user staring at "Starting..." for the full 10-minute
+            # pending timeout with no error shown, unable to retry, every
+            # time - a missing token is a permanent condition, not a
+            # transient one, so there is nothing to be gained by holding
+            # the slot while it fails.
+            if not token():
+                return self._send(503, json.dumps({
+                    "error": "the hub has no GitHub token configured, so it cannot start desktops yet"
+                }))
+
             sessions[my_username] = {
                 "status": "pending",
                 "email": session["email"],
@@ -1010,7 +1022,17 @@ class Handler(BaseHTTPRequestHandler):
                 "owner_email": session["email"],
                 "persist": "true" if req.get("persist") else "false",
             }
-            return self._trigger(wf, inputs)
+            resp = self._trigger(wf, inputs)
+            # Roll back on ANY dispatch failure, not just the missing-token
+            # case above - a GitHub outage, a revoked token or a rate limit
+            # would otherwise leave the session wedged in "pending" exactly
+            # the same way, occupying one of MAX_CONCURRENT until it aged out.
+            if not getattr(self, "_last_trigger_ok", False):
+                fresh = _load_sessions()
+                fresh.pop(my_username, None)
+                _save_sessions(fresh)
+                log_event("start_failed", username=my_username, email=session["email"])
+            return resp
 
         if action == "destroy":
             # A non-admin naming someone else's username gets a clear 403,
@@ -1030,6 +1052,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(400, json.dumps({"error": "unknown action"}))
 
     def _trigger(self, workflow_file, inputs):
+        # Sets _last_trigger_ok so the caller can tell a real dispatch from
+        # a failed one and roll back its own state - the return value here
+        # is an already-sent HTTP response, which cannot be inspected.
+        self._last_trigger_ok = False
         try:
             gh("POST", f"/repos/{REPO}/actions/workflows/{workflow_file}/dispatches",
                {"ref": "main", "inputs": inputs})
@@ -1037,6 +1063,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(exc.code, json.dumps({"error": exc.read().decode()[:400]}))
         except Exception as exc:
             return self._send(500, json.dumps({"error": str(exc)}))
+        self._last_trigger_ok = True
         return self._send(202, json.dumps({"ok": True}))
 
     def log_message(self, *_):

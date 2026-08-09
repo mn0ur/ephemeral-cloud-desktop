@@ -257,18 +257,78 @@ def verify_session(cookie_value: str):
     return payload
 
 
-def user_id_from(email: str, sub: str) -> str:
-    """A filesystem/tag/DNS-safe, stable-per-Google-account slug.
+USERS_FILE = os.environ.get("USERS_FILE", "/mnt/hubdata/control/users.json")
+HISTORY_FILE = os.environ.get("HISTORY_FILE", "/mnt/hubdata/control/history.jsonl")
 
-    Built from the email's local part plus a short hash of the account's
-    stable Google "sub" (not the email itself - emails can change ownership
-    on some providers, sub cannot), so two different Google accounts that
-    happen to share an email-like local part never collide.
+
+def _load_users():
+    try:
+        with open(USERS_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("by_sub", {})
+    data.setdefault("by_username", {})
+    return data
+
+
+def _save_users(data):
+    os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
+    tmp = USERS_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, USERS_FILE)
+
+
+def log_event(event: str, **fields):
+    """Append-only, one JSON object per line. Never read-modify-write - two
+    concurrent events can never corrupt each other, which a single JSON
+    document could. This is the "who logged in when, how long they used it"
+    record the admin can see; it is never used to make access decisions,
+    only to report on what already happened.
     """
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        with open(HISTORY_FILE, "a") as fh:
+            fh.write(json.dumps({"ts": time.time(), "event": event, **fields}) + "\n")
+    except OSError:
+        pass  # history is a record, not a control path - never block on it
+
+
+def user_id_from(email: str, sub: str) -> str:
+    """The desktop username: plain email local part - "alice", not
+    "alice-1d91fb" - for exactly as long as no other Google account has
+    ever claimed it.
+
+    The username also decides which persistent volume a "keep my data"
+    session reuses, so a collision is not cosmetic: it would hand one
+    person's files to whoever signs in second with a same-looking local
+    part (alice@gmail.com and alice@yahoo.com are different people). A
+    stable sub -> username mapping is kept on the persistent volume so
+    the same Google account always gets the same username back, and a
+    second, different account with the same local part is disambiguated
+    ("alice-2") rather than silently colliding.
+    """
+    users = _load_users()
+
+    existing = users["by_sub"].get(sub)
+    if existing:
+        return existing  # same Google account as before - same username, always
+
     local = (email.split("@")[0] if "@" in email else email).lower()
     local = re.sub(r"[^a-z0-9-]+", "-", local).strip("-")[:20] or "guest"
-    suffix = hashlib.sha256(sub.encode()).hexdigest()[:6]
-    return f"{local}-{suffix}"
+
+    candidate = local
+    n = 2
+    while candidate in users["by_username"]:
+        candidate = f"{local}-{n}"
+        n += 1
+
+    users["by_sub"][sub] = candidate
+    users["by_username"][candidate] = sub
+    _save_users(users)
+    log_event("first_login", username=candidate, email=email)
+    return candidate
 
 
 def verify_google_token(credential: str):
@@ -641,6 +701,22 @@ class Handler(BaseHTTPRequestHandler):
                                 "Actions: read and write on this repo.")
             return self._send(200, json.dumps(out))
 
+        if path == "/api/history":
+            session = self._session()
+            if not (session and session.get("is_admin")):
+                return self._send(403, json.dumps({"error": "admin only"}))
+            events = []
+            try:
+                with open(HISTORY_FILE) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line:
+                            events.append(json.loads(line))
+            except OSError:
+                pass
+            events.sort(key=lambda e: e.get("ts", 0), reverse=True)
+            return self._send(200, json.dumps({"events": events[:500]}))
+
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
@@ -678,6 +754,7 @@ class Handler(BaseHTTPRequestHandler):
         email = claims.get("email", "")
         sub = claims.get("sub", "")
         uid = user_id_from(email, sub)
+        log_event("login", username=uid, email=email)
         payload = {
             "sub": sub,
             "email": email,
@@ -700,6 +777,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, json.dumps({"error": "bad slot"}))
         slots = _load_slots()
         prior = slots.get(slot, {})
+        started_at = time.time()
         slots[slot] = {
             "status": "ready",  # control panel still polls healthz before "active"
             "user_id": prior.get("user_id"),
@@ -707,9 +785,11 @@ class Handler(BaseHTTPRequestHandler):
             "url": req.get("url"),
             "password": req.get("password"),
             "kill_at": req.get("kill_at"),
-            "started_at": time.time(),
+            "started_at": started_at,
         }
         _save_slots(slots)
+        log_event("start", username=prior.get("user_id"), email=prior.get("email"),
+                   slot=slot, url=req.get("url"))
         return self._send(200, json.dumps({"ok": True}))
 
     def _session_ended(self, req):
@@ -719,8 +799,14 @@ class Handler(BaseHTTPRequestHandler):
         if slot not in SLOTS:
             return self._send(400, json.dumps({"error": "bad slot"}))
         slots = _load_slots()
+        prior = slots.get(slot, {})
+        duration_s = None
+        if prior.get("started_at"):
+            duration_s = round(time.time() - prior["started_at"])
         slots[slot] = {"status": "idle"}
         _save_slots(slots)
+        log_event("destroy", username=prior.get("user_id"), email=prior.get("email"),
+                   slot=slot, duration_s=duration_s, reason=req.get("reason", "manual"))
         return self._send(200, json.dumps({"ok": True}))
 
     # -- Start / destroy -----------------------------------------------------

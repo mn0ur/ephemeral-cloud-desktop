@@ -25,12 +25,12 @@ locals {
   # name has to be account-unique, which IAM role and key pair names are -
   # two slots applying at once would otherwise race to create the same
   # "mnour-desktop-instance" role.
-  slot_suffix = var.slot == "" ? "" : "-${var.slot}"
-  name        = "${var.project}${local.slot_suffix}"
-  display     = "mnour-desktop${local.slot_suffix}"
+  user_suffix = var.username == "" ? "" : "-${var.username}"
+  name        = "${var.project}${local.user_suffix}"
+  display     = "mnour-desktop${local.user_suffix}"
   data_bucket = "${var.project}-${local.account_id}-data"
 
-  effective_hostname = var.slot == "" ? var.hostname : "desk-${var.slot}.${var.cloudflare_zone}"
+  effective_hostname = var.username == "" ? var.hostname : "${var.username}.desktop.${var.cloudflare_zone}"
 
   # Must match terraform/persistent, which derives its AZ identically. An EBS
   # volume can only attach to an instance in the same availability zone, so
@@ -50,7 +50,7 @@ locals {
 # remove it. Only looked up for the owner's own desktop (slot == ""); guests
 # get a separate, per-guest volume below instead.
 data "aws_ebs_volume" "data" {
-  count = var.slot == "" ? 1 : 0
+  count = var.username == "" ? 1 : 0
 
   most_recent = true
 
@@ -330,13 +330,18 @@ resource "aws_instance" "desktop" {
     }
   }
 
-  # Owner/Slot/KillAt only exist on guest instances - the owner's own
-  # desktop keeps exactly the tag set it always had. KillAt is what the
-  # desktop-reaper workflow reads to force-destroy a forgotten session.
+  # Owner/Role/OwnerEmail only exist on guest instances - the owner's own
+  # desktop keeps exactly the tag set it always had. Role=guest-desktop is
+  # how desktop-reaper.yml finds every live guest desktop to check for
+  # idleness - there is no fixed list of slots any more to loop over, so
+  # discovery has to be by tag, not by a hardcoded set of names.
   tags = merge(
     { Name = local.display },
-    var.slot != "" ? { Owner = var.user_id, Slot = var.slot, OwnerEmail = var.owner_email } : {},
-    var.kill_at != "" ? { KillAt = var.kill_at } : {},
+    var.username != "" ? {
+      Owner      = var.username
+      OwnerEmail = var.owner_email
+      Role       = "guest-desktop"
+    } : {},
   )
 }
 
@@ -344,7 +349,7 @@ resource "aws_instance" "desktop" {
 # it; the volume itself survives in the persistent stack. Guests never touch
 # this - see aws_volume_attachment.guest_data below.
 resource "aws_volume_attachment" "data" {
-  count = var.slot == "" ? 1 : 0
+  count = var.username == "" ? 1 : 0
 
   device_name = "/dev/sdf"
   volume_id   = data.aws_ebs_volume.data[0].id
@@ -360,7 +365,7 @@ resource "aws_volume_attachment" "data" {
 # happen outside Terraform. Empty means the guest chose not to keep their
 # data: nothing is attached, root disk only, gone completely on destroy.
 resource "aws_volume_attachment" "guest_data" {
-  count = var.slot != "" && var.user_volume_id != "" ? 1 : 0
+  count = var.username != "" && var.user_volume_id != "" ? 1 : 0
 
   device_name  = "/dev/sdf"
   volume_id    = var.user_volume_id

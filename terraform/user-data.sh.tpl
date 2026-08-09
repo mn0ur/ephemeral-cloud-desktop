@@ -245,9 +245,16 @@ docker exec webtop bash -lc "chfn -f '${web_user}' abc 2>/dev/null || true; \
 # Caddy. The container listens on loopback only, so Caddy is the sole ingress
 # and TLS cannot be bypassed by hitting the port directly.
 # ---------------------------------------------------------------------------
+mkdir -p /var/log/caddy
+chown caddy:caddy /var/log/caddy
+
 cat >/etc/caddy/Caddyfile <<CADDY
 $HOSTNAME_FQDN {
 	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/access.log
+	}
 
 	# Unauthenticated liveness probe. The desktop itself answers 401 when it
 	# is perfectly healthy - that is the login prompt - and most monitors
@@ -257,11 +264,65 @@ $HOSTNAME_FQDN {
 		respond "ok" 200
 	}
 
+	# Idle detection for per-user desktops with no fixed session length: the
+	# reaper polls this instead of comparing against a timestamp fixed at
+	# launch, since "destroy after 4h of not being USED" and "destroy 4h
+	# after launch regardless of use" are genuinely different things. The
+	# tailer service below is what actually keeps this file current.
+	handle /last-activity {
+		root * /run
+		rewrite * last-activity.txt
+		file_server
+	}
+
 	handle {
 		reverse_proxy 127.0.0.1:3000
 	}
 }
 CADDY
+
+# ---------------------------------------------------------------------------
+# Activity tracker. Watches Caddy's own access log rather than instrumenting
+# webtop or Selkies directly - real usage (loading the page, the Selkies
+# WebSocket, any asset) all pass through Caddy, and this needs no changes on
+# the container side at all. Excludes /healthz and /last-activity itself, or
+# monitoring traffic and the reaper's own polling would look like activity
+# and the desktop would never appear idle.
+# ---------------------------------------------------------------------------
+date -u +%s > /run/last-activity.txt
+chmod 644 /run/last-activity.txt
+
+cat >/usr/local/bin/activity-tracker <<'TRACKER'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG=/var/log/caddy/access.log
+for _ in $(seq 1 30); do [ -f "$LOG" ] && break; sleep 2; done
+touch "$LOG"
+tail -n0 -F "$LOG" 2>/dev/null | while IFS= read -r line; do
+  case "$line" in
+    *'"uri":"/healthz"'*|*'"uri":"/last-activity"'*) ;;
+    *) date -u +%s > /run/last-activity.txt ;;
+  esac
+done
+TRACKER
+chmod 755 /usr/local/bin/activity-tracker
+
+cat >/etc/systemd/system/activity-tracker.service <<'UNIT'
+[Unit]
+Description=Track last real request to the desktop, for idle-based auto-destroy
+After=caddy.service
+
+[Service]
+ExecStart=/usr/local/bin/activity-tracker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now activity-tracker
 
 # ---------------------------------------------------------------------------
 # Caddy's certificate storage lives on the PERSISTENT volume.

@@ -162,37 +162,43 @@ variable "web_password_override" {
 }
 
 # ---------------------------------------------------------------------------
-# Guest self-service slots.
+# Guest self-service desktops - desktop.mnour.dev.
 #
-# Everything below defaults to "off" - empty slot means this apply IS the
-# original single-user desktop, byte-identical to before these variables
-# existed. Nothing about the owner's own desktop changes unless a workflow
-# explicitly passes slot = "a" or "b".
+# Empty username (default) is the owner's original single desktop at
+# desk.mnour.dev, byte-identical to before this section existed - nothing
+# about it changes unless a workflow explicitly passes a username.
 #
-# Only two slots exist, ever. That is what makes "at most 2 concurrent
-# desktops" true without a counter to keep in sync anywhere - there is
-# structurally nowhere for a third one to run.
+# Any other value provisions <username>.desktop.mnour.dev. There is no fixed
+# slot count any more - concurrency is capped (currently 5) by the control
+# panel counting active sessions before it will dispatch a new one, since
+# with per-user state keys there is no structural "only N slots exist" limit
+# the way there was with the two fixed slots this replaced.
 # ---------------------------------------------------------------------------
 
-variable "slot" {
-  description = "Guest slot: \"\" (default) is the owner's own desktop. \"a\" or \"b\" is a guest slot with its own hostname, IAM role and security group so two can run at once without name collisions."
+variable "username" {
+  description = <<-EOT
+    "" (default): the owner's own desktop, desk.mnour.dev - unchanged.
+
+    Anything else: a per-user desktop at <username>.desktop.mnour.dev. Must
+    be a single valid DNS label - lowercase letters, digits, hyphens, no
+    leading/trailing hyphen, 63 chars max. The control panel derives this
+    from the Google account's email local part (with a numeric suffix on
+    collision - see user_id_from in hub/control/control.py), so it is
+    already guaranteed to satisfy this by the time it reaches here; the
+    validation exists to catch a mistake in that derivation, not to be
+    someone's first line of defense.
+  EOT
   type        = string
   default     = ""
 
   validation {
-    condition     = contains(["", "a", "b"], var.slot)
-    error_message = "slot must be \"\", \"a\", or \"b\" - there are only two guest slots by design."
+    condition     = var.username == "" || can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", var.username))
+    error_message = "username must be empty, or a single valid DNS label."
   }
 }
 
-variable "user_id" {
-  description = "Stable identifier for a guest (derived from their Google account). Only used for tagging when slot != \"\"."
-  type        = string
-  default     = ""
-}
-
 variable "owner_email" {
-  description = "Guest's email, for tagging only. Never used in any resource name."
+  description = "Guest's email, for tagging and the history log only. Never used in any resource name."
   type        = string
   default     = ""
 }
@@ -208,12 +214,6 @@ variable "user_volume_id" {
     do it from inside user-data. Empty here means nothing is attached, so a
     guest who chose "don't keep my data" has nothing left to lose.
   EOT
-  type        = string
-  default     = ""
-}
-
-variable "kill_at" {
-  description = "RFC3339 timestamp tagged onto the instance. The desktop-reaper workflow destroys anything past this time, regardless of activity. Empty (default) means no forced destroy - only guest sessions get one."
   type        = string
   default     = ""
 }

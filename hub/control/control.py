@@ -93,12 +93,24 @@ def latest_run():
     if not runs:
         return {}
     r = runs[0]
+
+    # Uptime must be measured from the last START, not from whatever ran most
+    # recently. Using runs[0] meant that right after a DESTROY was dispatched
+    # the panel read the destroy's timestamp and reported "0m - $0.00" for a
+    # desktop that had been billing for hours.
+    started_up = None
+    for run in runs:
+        if "START" in (run.get("name") or "").upper() and run.get("conclusion") == "success":
+            started_up = run.get("run_started_at")
+            break
+
     return {
         "name": r.get("name"),
         "status": r.get("status"),          # queued | in_progress | completed
         "conclusion": r.get("conclusion"),  # success | failure | cancelled
         "url": r.get("html_url"),
         "started": r.get("run_started_at"),
+        "started_up": started_up,
     }
 
 
@@ -233,7 +245,7 @@ function render(s){
   } else {
     $('dot').className='dot '+(up?'up':'down');
     if(up){
-      const started=run.started?Date.parse(run.started):null;
+      const started=run.started_up?Date.parse(run.started_up):null;
       if(started){
         const ms=Date.now()-started, cost=(ms/3600000)*(s.hourly_usd||0.104);
         $('txt').textContent=`Running · ${fmtDur(ms)} · ~$${cost.toFixed(2)} this session`;

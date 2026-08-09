@@ -874,7 +874,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._google_login(req)
         if path == "/api/google-logout":
             return self._send(200, json.dumps({"ok": True}),
-                               set_cookie="session=; Path=/control; Max-Age=0")
+                               set_cookie="session=; Path=/; Max-Age=0")
         if path == "/api/session-ready":
             return self._session_ready(req)
         if path == "/api/session-ended":
@@ -904,9 +904,18 @@ class Handler(BaseHTTPRequestHandler):
             "exp": time.time() + SESSION_MAX_AGE,
         }
         cookie = sign_session(payload)
+        # Path=/, not /control - hub.mnour.dev serves everything under
+        # /control/, but desktop.mnour.dev serves from the root. A cookie
+        # scoped to /control is simply never sent on desktop.mnour.dev's
+        # /api/status calls, which is exactly what happened the first time
+        # this shipped: sign-in appeared to succeed (Google's popup closed
+        # normally) and then nothing else ever changed, because the session
+        # the browser held was never being presented to the one domain that
+        # needed to see it. The domain itself already scopes this cookie;
+        # there was never a security reason for the path to be narrower too.
         return self._send(
             200, json.dumps({"user_id": uid, "email": email}),
-            set_cookie=f"session={cookie}; Path=/control; HttpOnly; Secure; SameSite=Lax; Max-Age={SESSION_MAX_AGE}",
+            set_cookie=f"session={cookie}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={SESSION_MAX_AGE}",
         )
 
     # -- Callbacks from GitHub Actions (shared secret, not a session) ------

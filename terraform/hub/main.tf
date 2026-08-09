@@ -147,6 +147,25 @@ variable "admin_google_sub" {
   sensitive   = true
 }
 
+variable "cloudflare_dns_api_token" {
+  description = <<-EOT
+    Handed to Caddy itself (not just the Terraform provider) so it can prove
+    domain ownership via a DNS-01 TXT record instead of the default HTTP-01
+    challenge. That is what makes ONE certificate cover *.desktop.mnour.dev
+    regardless of how many usernames ever exist - HTTP-01 needs a separate
+    certificate per hostname, capped at 5 issuances per hostname per 168h,
+    which is the exact limit that caused two outages earlier in this
+    project's life once a hostname got rebuilt a handful of times in a day.
+
+    Needs Zone:DNS:Edit on the mnour.dev zone - the same permission the
+    Terraform provider already needs, so in practice this is the same
+    token, just also read by Caddy at runtime.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 locals {
   az = "${var.region}a"
 
@@ -312,14 +331,16 @@ resource "aws_instance" "hub" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user-data.sh.tpl", {
-    hostname            = var.hostname
-    dashboard_password  = random_password.dashboard.result
-    tailscale_auth_key  = var.tailscale_auth_key
-    monitor_targets     = join(",", var.monitor_targets)
-    google_client_id    = var.google_client_id
-    admin_google_sub    = var.admin_google_sub
-    session_secret      = random_password.session_secret.result
-    hub_callback_secret = random_password.hub_callback_secret.result
+    hostname                 = var.hostname
+    dashboard_password       = random_password.dashboard.result
+    tailscale_auth_key       = var.tailscale_auth_key
+    monitor_targets          = join(",", var.monitor_targets)
+    google_client_id         = var.google_client_id
+    admin_google_sub         = var.admin_google_sub
+    session_secret           = random_password.session_secret.result
+    hub_callback_secret      = random_password.hub_callback_secret.result
+    cloudflare_dns_api_token = var.cloudflare_dns_api_token
+    cloudflare_zone          = var.cloudflare_zone
   })
 
   root_block_device {

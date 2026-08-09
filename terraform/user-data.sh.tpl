@@ -38,12 +38,58 @@ apt-get install -y --no-install-recommends docker.io
 systemctl stop docker docker.socket || true
 systemctl disable docker || true
 
-curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  > /etc/apt/sources.list.d/caddy-stable.list
-apt-get update -y
-apt-get install -y caddy
+CF_DNS_TOKEN="${cloudflare_dns_api_token}"
+
+if [ -n "$CF_DNS_TOKEN" ]; then
+  # DNS-01 instead of the default HTTP-01: proves ownership via a Cloudflare
+  # TXT record rather than answering a challenge on port 80. Stock apt Caddy
+  # has no DNS provider built in, so this fetches Caddy's own build service
+  # for a binary with the Cloudflare module compiled in - no local Go
+  # toolchain needed, no xcaddy. Falls back to the stock apt package (plain
+  # HTTP-01, exactly as before this variable existed) when no token is
+  # supplied, which is always true for the owner's own desk.mnour.dev today.
+  echo "fetching Caddy with the Cloudflare DNS module"
+  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/cloudflare" \
+    -o /usr/bin/caddy
+  chmod 755 /usr/bin/caddy
+  id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
+  mkdir -p /etc/caddy /var/lib/caddy
+  chown -R caddy:caddy /var/lib/caddy
+  cat >/etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy (custom build - caddy-dns/cloudflare)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  mkdir -p /etc/systemd/system/caddy.service.d
+  cat >/etc/systemd/system/caddy.service.d/cloudflare-token.conf <<TOKENCONF
+[Service]
+Environment=CF_API_TOKEN=$CF_DNS_TOKEN
+TOKENCONF
+  chmod 600 /etc/systemd/system/caddy.service.d/cloudflare-token.conf
+else
+  curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+    > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -y
+  apt-get install -y caddy
+fi
 
 # ---------------------------------------------------------------------------
 # Attach and mount the persistent volume.
@@ -248,9 +294,20 @@ docker exec webtop bash -lc "chfn -f '${web_user}' abc 2>/dev/null || true; \
 mkdir -p /var/log/caddy
 chown caddy:caddy /var/log/caddy
 
+# Empty when no Cloudflare token was supplied - the owner's own desktop
+# gets no tls block at all, and Caddy falls back to its HTTP-01 default,
+# byte-identical to how this worked before DNS-01 existed.
+TLS_BLOCK=""
+if [ -n "$CF_DNS_TOKEN" ]; then
+  TLS_BLOCK="	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+"
+fi
+
 cat >/etc/caddy/Caddyfile <<CADDY
 $HOSTNAME_FQDN {
-	encode zstd gzip
+$TLS_BLOCK	encode zstd gzip
 
 	log {
 		output file /var/log/caddy/access.log
@@ -349,6 +406,18 @@ Environment=XDG_DATA_HOME=$PERSIST_ROOT/caddy
 OVERRIDE
 
 systemctl daemon-reload
+
+# Same rule as the hub's Caddyfile, learned there the hard way: `systemctl
+# restart` on a broken config can fail in ways that leave Caddy not running
+# at all, with nothing in the logs pointing at why. Validate first, so a bad
+# Caddyfile (the DNS-01 tls block above is new tonight, and new is exactly
+# when this is most likely) fails loudly here instead of silently offline.
+if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+  echo "FATAL: generated Caddyfile is invalid - refusing to start Caddy."
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || true
+  exit 1
+fi
+
 systemctl enable caddy
 systemctl restart caddy
 

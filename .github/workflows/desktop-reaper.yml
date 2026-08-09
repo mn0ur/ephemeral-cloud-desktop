@@ -1,12 +1,13 @@
 name: Desktop - REAPER
 
-# Guest sessions get a KillAt tag at launch (see desktop-up.yml). Nothing
-# else enforces it - a guest who closes the tab and never clicks Destroy
-# would otherwise bill $0.104/hr indefinitely. This is the clock that makes
-# the session cap real instead of aspirational.
+# Per-user desktops have no fixed session length any more - a guest who
+# closes the tab and never clicks Destroy would otherwise bill $0.104/hr
+# indefinitely. This is what enforces "destroy after 4 hours of not being
+# USED" (not "4 hours after launch regardless of use") in practice.
 #
-# Only ever touches guest slots (a/b). The owner's own desktop has no KillAt
-# tag and is never force-destroyed by this workflow.
+# There is no fixed list of usernames to loop over - discovery is by AWS
+# tag (Role=guest-desktop), not a hardcoded set. The owner's own desktop
+# carries no such tag and is never touched by this workflow.
 on:
   schedule:
     - cron: "*/15 * * * *"
@@ -15,9 +16,12 @@ on:
 permissions:
   contents: read
 
+env:
+  IDLE_LIMIT_S: 14400 # 4 hours
+
 jobs:
   reap:
-    name: destroy anything past its KillAt time
+    name: destroy anything idle past the limit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +43,7 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
           echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
 
-      - name: Check both slots and destroy anything overdue
+      - name: Discover every live guest desktop, destroy anything idle
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
@@ -47,32 +51,43 @@ jobs:
           set -uo pipefail
           NOW=$(date -u +%s)
 
-          for SLOT in a b; do
-            KILL_AT=$(aws ec2 describe-instances --region eu-central-1 \
-              --filters "Name=tag:Slot,Values=$SLOT" "Name=instance-state-name,Values=running,pending" \
-              --query 'Reservations[0].Instances[0].Tags[?Key==`KillAt`].Value | [0]' \
-              --output text 2>/dev/null)
+          USERNAMES=$(aws ec2 describe-instances --region eu-central-1 \
+            --filters "Name=tag:Role,Values=guest-desktop" "Name=instance-state-name,Values=running,pending" \
+            --query 'Reservations[].Instances[].Tags[?Key==`Owner`].Value | [0]' \
+            --output text)
 
-            if [ -z "$KILL_AT" ] || [ "$KILL_AT" = "None" ]; then
-              echo "slot $SLOT: nothing running, or no KillAt tag - skipping"
+          if [ -z "$USERNAMES" ]; then
+            echo "no guest desktops currently running"
+            exit 0
+          fi
+
+          for USERNAME in $USERNAMES; do
+            URL="https://$USERNAME.desktop.mnour.dev"
+            LAST=$(curl -fsS --max-time 8 "$URL/last-activity" 2>/dev/null || echo "")
+
+            if ! [[ "$LAST" =~ ^[0-9]+$ ]]; then
+              # Can't reach it, or it hasn't finished booting yet - do not
+              # destroy on the strength of a failed HTTP request. A network
+              # blip must never look the same as genuine inactivity.
+              echo "$USERNAME: /last-activity unreachable or malformed ('$LAST') - leaving it, not treating as idle"
               continue
             fi
 
-            KILL_TS=$(date -u -d "$KILL_AT" +%s 2>/dev/null || echo 0)
-            if [ "$KILL_TS" -le "$NOW" ]; then
-              echo "slot $SLOT: KillAt=$KILL_AT has passed - destroying"
+            IDLE_S=$((NOW - LAST))
+            if [ "$IDLE_S" -ge "$IDLE_LIMIT_S" ]; then
+              echo "$USERNAME: idle ${IDLE_S}s >= ${IDLE_LIMIT_S}s limit - destroying"
               terraform -chdir=terraform init -input=false -reconfigure \
-                -backend-config="key=desktop/slot-$SLOT/terraform.tfstate"
-              TF_VAR_slot="$SLOT" terraform -chdir=terraform destroy -auto-approve -input=false
+                -backend-config="key=desktop/user-$USERNAME/terraform.tfstate"
+              TF_VAR_username="$USERNAME" terraform -chdir=terraform destroy -auto-approve -input=false
 
               if [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
-                curl -fsS -X POST "https://hub.mnour.dev/control/api/session-ended" \
+                curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
                   -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
                   -H "Content-Type: application/json" \
-                  -d "{\"slot\":\"$SLOT\",\"reason\":\"reaped\"}" \
-                  || echo "::warning::callback to hub failed for slot $SLOT - destroy already succeeded"
+                  -d "{\"username\":\"$USERNAME\",\"reason\":\"idle\"}" \
+                  || echo "::warning::callback failed for $USERNAME - destroy already succeeded"
               fi
             else
-              echo "slot $SLOT: KillAt=$KILL_AT is still in the future - leaving it"
+              echo "$USERNAME: idle ${IDLE_S}s, under the ${IDLE_LIMIT_S}s limit - leaving it"
             fi
           done

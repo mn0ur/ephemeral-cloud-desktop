@@ -294,14 +294,15 @@ resource "aws_instance" "desktop" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user-data.sh.tpl", {
-    hostname     = local.effective_hostname
-    image        = var.image
-    timezone     = var.timezone
-    web_user     = var.web_user
-    web_password = local.web_password
-    encoder      = var.encoder
-    framerate    = var.framerate
-    fresh        = var.fresh ? "true" : "false"
+    hostname                 = local.effective_hostname
+    image                    = var.image
+    timezone                 = var.timezone
+    web_user                 = var.web_user
+    web_password             = local.web_password
+    encoder                  = var.encoder
+    framerate                = var.framerate
+    fresh                    = var.fresh ? "true" : "false"
+    cloudflare_dns_api_token = var.cloudflare_dns_api_token
   })
 
   root_block_device {

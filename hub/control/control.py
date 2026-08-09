@@ -57,11 +57,16 @@ TOKEN_FILE = os.environ.get("GH_TOKEN_FILE", "/etc/hub/github-token")
 DESKTOP_URL = os.environ.get("DESKTOP_URL", "https://desk.mnour.sd")
 LISTEN = ("127.0.0.1", 8000)
 
-# Where guest slot state persists across a hub restart. On the hub's own
-# EBS volume, same reasoning as Uptime Kuma's data: a service restart must
-# not make the control panel forget who owns a currently-running slot.
-SLOTS_FILE = os.environ.get("SLOTS_FILE", "/mnt/hubdata/control/slots.json")
-SLOTS = ("a", "b")
+# Where live guest session state persists across a hub restart. On the
+# hub's own EBS volume, same reasoning as Uptime Kuma's data: a service
+# restart must not make the control panel forget who currently has a
+# desktop running. Keyed by username now, not a fixed set of slot letters -
+# there is no structural limit on how many distinct usernames can exist,
+# only on how many are ALLOWED to run at once (MAX_CONCURRENT), which this
+# file enforces explicitly rather than getting it for free from "only 2
+# slots exist".
+SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "/mnt/hubdata/control/sessions.json")
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
 
 # Measured spot price for c7i.xlarge in eu-central-1. Used only to show a
 # running estimate - the authoritative number is always the AWS bill.
@@ -156,65 +161,66 @@ def latest_run():
 
 
 # ---------------------------------------------------------------------------
-# Guest slot state. A flat JSON file, not a database - two slots do not
-# justify one, and the file lives on the hub's persistent volume so a
-# service restart mid-session does not forget who owns what.
+# Live guest sessions. A flat JSON file keyed by username, not a database -
+# five concurrent sessions do not justify one, and the file lives on the
+# hub's persistent volume so a service restart mid-session does not forget
+# who currently has a desktop running.
+#
+# {"alice": {"status": "active", "email": ..., "url": ..., ...}, ...}
+#
+# A username absent from this dict means "not running" - there is no fixed
+# "idle" placeholder the way the old 2-slot model had one per letter,
+# because the set of possible usernames is unbounded.
 # ---------------------------------------------------------------------------
 
-def _load_slots():
+def _load_sessions():
     try:
-        with open(SLOTS_FILE) as fh:
-            data = json.load(fh)
+        with open(SESSIONS_FILE) as fh:
+            return json.load(fh)
     except (OSError, ValueError):
-        data = {}
-    for s in SLOTS:
-        data.setdefault(s, {"status": "idle"})
-    return data
+        return {}
 
 
-def _save_slots(data):
-    os.makedirs(os.path.dirname(SLOTS_FILE), exist_ok=True)
-    tmp = SLOTS_FILE + ".tmp"
+def _save_sessions(data):
+    os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
+    tmp = SESSIONS_FILE + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh)
-    os.replace(tmp, SLOTS_FILE)  # atomic - a crash mid-write cannot corrupt it
+    os.replace(tmp, SESSIONS_FILE)  # atomic - a crash mid-write cannot corrupt it
 
 
-def free_slot(slots):
-    for s in SLOTS:
-        if slots.get(s, {}).get("status") in ("idle", "error"):
-            return s
-    return None
+def active_count(sessions):
+    return sum(1 for s in sessions.values() if s.get("status") in ("pending", "ready", "active"))
 
 
 PENDING_TIMEOUT_S = 10 * 60  # a workflow that fails to reach "ready" this long is stuck, not slow
 
 
-def refresh_slots(slots):
+def refresh_sessions(sessions):
     """Two things nothing else in this file does on its own:
 
     ready -> active, once the guest's own /healthz actually answers. Without
-    this a slot sits at "Booting..." forever even after the desktop is up,
-    because the session-ready callback fires right after `terraform apply`
-    returns - well before the container has pulled and TLS has settled.
+    this a session sits at "Booting..." forever even after the desktop is
+    up, because the session-ready callback fires right after `terraform
+    apply` returns - well before the container has pulled and TLS settled.
 
     pending -> error, if session-ready never arrives within 10 minutes. A
     failed workflow run (bad AMI, spot capacity, a Terraform error) would
-    otherwise hold a slot "in use" forever - one of only two that exist.
+    otherwise hold a concurrency slot forever - one of only MAX_CONCURRENT
+    that exist, unlike a stray file with no cost to leaving it stuck.
     """
     changed = False
     now = time.time()
-    for name in SLOTS:
-        s = slots.get(name, {"status": "idle"})
+    for username, s in list(sessions.items()):
         if s.get("status") == "ready" and url_up(s.get("url") or ""):
             s["status"] = "active"
             changed = True
         elif s.get("status") == "pending" and now - s.get("dispatched_at", now) > PENDING_TIMEOUT_S:
-            slots[name] = {"status": "error"}
+            sessions[username] = {"status": "error"}
             changed = True
     if changed:
-        _save_slots(slots)
-    return slots
+        _save_sessions(sessions)
+    return sessions
 
 
 # ---------------------------------------------------------------------------
@@ -426,16 +432,6 @@ PAGE = """<!doctype html>
  input[type=text]:focus{outline:none;border-color:var(--green-dim)}
  input[type=checkbox]{accent-color:var(--green)}
  .err{color:#ff9a94;font-size:.76rem;margin-top:.7rem;white-space:pre-wrap}
- .slots{display:grid;grid-template-columns:1fr 1fr;gap:.9rem}
- @media (max-width:520px){.slots{grid-template-columns:1fr}}
- .slot-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.9rem;font-size:.82rem}
- .slot-card h3{margin:0 0 .5rem;font-size:.8rem;color:var(--dim);font-weight:600;letter-spacing:.5px}
- .who{font-size:.72rem;color:var(--mute);margin-top:.3rem;word-break:break-all}
- .cred{font-size:.72rem;color:var(--amber);margin-top:.4rem;word-break:break-all}
- .g-signin{display:flex;justify-content:center;margin-bottom:.6rem}
- .signed-in{display:flex;justify-content:space-between;align-items:center;font-size:.78rem;color:var(--dim);margin-bottom:.6rem}
- .signed-in button{flex:none;min-width:auto;padding:.35rem .7rem;font-size:.72rem}
- .disabled-note{font-size:.76rem;color:var(--mute);text-align:center;padding:1rem 0}
 </style>
 
 <div class="card">
@@ -466,24 +462,12 @@ PAGE = """<!doctype html>
   </fieldset>
 
   <div id="err" class="err"></div>
-</div>
 
-<div class="card">
-  <h2>Guest desktops</h2>
-  <div class="sub">Sign in with Google, get your own desktop. Two can run at once; each session auto-ends after its time limit.</div>
-
-  <div id="g-anon" class="g-signin"></div>
-  <div id="g-signed" class="signed-in" style="display:none">
-    <span id="g-email"></span>
-    <button id="g-signout">Sign out</button>
+  <div class="sub" style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">
+    Self-service guest desktops moved to <a href="https://desktop.mnour.dev" style="color:var(--cyan)">desktop.mnour.dev</a>.
   </div>
-  <div id="g-disabled" class="disabled-note" style="display:none">Sign-in is not configured yet.</div>
-
-  <div id="g-slots" class="slots"></div>
-  <div id="g-err" class="err"></div>
 </div>
 
-<script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 const $=i=>document.getElementById(i);
 let busy=null, t0=0;
@@ -539,7 +523,6 @@ async function poll(){
     if(busy==='start'&&s.desktop_up){busy=null;location.href=s.desktop_url||'/'}
     if(busy==='destroy'&&!s.desktop_up&&s.run&&s.run.status==='completed'){busy=null}
     render(s);
-    renderGuest(s);
   }catch(e){
     // A poll that dies must not leave the UI stuck mid-action.
     busy=null;
@@ -564,68 +547,221 @@ async function go(action){
 $('start').onclick=()=>go('start');
 $('destroy').onclick=()=>go('destroy');
 
-// ---------------- guest section ----------------
-let session=null, guestBusy={};
+poll();setInterval(poll,5000);
+</script>
+"""
 
-function renderGuest(s){
-  if(s.google_client_id && !window.__gRendered){
-    window.__gRendered=true;
-    google.accounts.id.initialize({client_id:s.google_client_id, callback:onGoogleCredential});
-    google.accounts.id.renderButton($('g-anon'), {theme:'filled_black', size:'large'});
+# ---------------------------------------------------------------------------
+# desktop.mnour.dev - the self-service product. Same visual system as the
+# hub's own page (same CSS tokens), different content entirely: Google
+# sign-in, one desktop per person, and - for the admin only - every live
+# session plus the full history log.
+# ---------------------------------------------------------------------------
+DESKTOP_PAGE = """<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cloud Desktop</title>
+<style>
+ :root{
+   --bg:#04070c; --bg2:#070d16; --panel:#0a121e; --panel2:#0d1726;
+   --border:#16283c; --border-hi:#1f3a55;
+   --green:#3dffa2; --green-dim:#17a866; --cyan:#56d4ff; --amber:#ffc46b;
+   --red:#ff5f56; --text:#c9d7e6; --dim:#64788f; --mute:#3d4f63;
+   --mono:"JetBrains Mono","Fira Code",Consolas,"Courier New",monospace;
+   --glow:0 0 12px rgba(61,255,162,.45); --radius:10px;
+   color-scheme:dark;
+ }
+ *{box-sizing:border-box}
+ body{margin:0;font:14px/1.6 var(--mono);background:var(--bg);color:var(--text);
+      display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:1.5rem 1rem;gap:1.2rem;
+      background-image:linear-gradient(rgba(22,40,60,.25) 1px,transparent 1px),
+                       linear-gradient(90deg,rgba(22,40,60,.25) 1px,transparent 1px);
+      background-size:44px 44px}
+ .card{width:100%;max-width:680px;background:var(--panel);border:1px solid var(--border);
+       border-radius:var(--radius);padding:1.5rem;box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+ .bar-top{display:flex;gap:.45rem;margin-bottom:1.1rem}
+ .bar-top i{width:11px;height:11px;border-radius:50%;display:block}
+ .bar-top i:nth-child(1){background:var(--red)}
+ .bar-top i:nth-child(2){background:var(--amber)}
+ .bar-top i:nth-child(3){background:var(--green)}
+ h1{margin:0 0 .2rem;font-size:1.1rem;color:var(--green);font-weight:600;letter-spacing:.5px}
+ h1::before{content:"$ ";color:var(--green-dim)}
+ h2{margin:0 0 .6rem;font-size:.85rem;color:var(--cyan);font-weight:600}
+ .sub{color:var(--mute);font-size:.78rem;margin-bottom:1.1rem}
+ .dot{width:10px;height:10px;border-radius:50%;background:var(--mute);display:inline-block;flex:none}
+ .dot.up{background:var(--green);box-shadow:var(--glow)}
+ .dot.down{background:var(--red)}
+ .dot.work{background:var(--amber);animation:p 1s infinite}
+ @keyframes p{50%{opacity:.25}}
+ .g-signin{display:flex;justify-content:center;margin:.4rem 0 1rem}
+ .signed-in{display:flex;justify-content:space-between;align-items:center;font-size:.8rem;color:var(--dim);margin-bottom:1rem}
+ .signed-in button{padding:.4rem .8rem;font-size:.74rem}
+ .disabled-note{font-size:.78rem;color:var(--mute);text-align:center;padding:1rem 0}
+ button{padding:.7rem 1rem;border-radius:7px;cursor:pointer;
+        font-family:var(--mono);font-weight:600;font-size:.85rem;
+        background:var(--panel2);color:var(--text);border:1px solid var(--border-hi);
+        transition:border-color .15s,box-shadow .15s,color .15s}
+ .go:hover:not(:disabled){border-color:var(--green-dim);color:var(--green);box-shadow:var(--glow)}
+ .stop:hover:not(:disabled){border-color:var(--red);color:var(--red);box-shadow:0 0 12px rgba(255,95,86,.4)}
+ button:disabled{opacity:.35;cursor:not-allowed}
+ .row{display:flex;gap:.55rem;flex-wrap:wrap;margin-top:.8rem}
+ .open{display:inline-block;margin-top:.7rem;padding:.6rem 1rem;border-radius:7px;text-align:center;
+       text-decoration:none;font-weight:600;font-size:.85rem;
+       background:var(--panel2);border:1px solid var(--green-dim);color:var(--green)}
+ .open:hover{box-shadow:var(--glow)}
+ label{display:block;font-size:.78rem;color:var(--dim);margin:.6rem 0}
+ input[type=checkbox]{accent-color:var(--green)}
+ .cred{font-size:.76rem;color:var(--amber);margin-top:.5rem;word-break:break-all}
+ .who{font-size:.76rem;color:var(--mute);margin-top:.3rem}
+ .err{color:#ff9a94;font-size:.78rem;margin-top:.7rem;white-space:pre-wrap}
+ table{width:100%;border-collapse:collapse;font-size:.76rem;margin-top:.5rem}
+ th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--border)}
+ th{color:var(--dim);font-weight:600}
+ .sess-row{display:flex;justify-content:space-between;align-items:center;padding:.6rem 0;border-bottom:1px solid var(--border)}
+ .sess-row:last-child{border-bottom:none}
+</style>
+
+<div class="card">
+  <div class="bar-top"><i></i><i></i><i></i></div>
+  <h1>cloud desktop</h1>
+  <div class="sub">Sign in with your Google account. Choose to keep your data or not. Auto-ends after 4 hours of inactivity.</div>
+
+  <div id="g-anon" class="g-signin"></div>
+  <div id="g-signed" class="signed-in" style="display:none">
+    <span id="g-email"></span>
+    <button id="g-signout">Sign out</button>
+  </div>
+  <div id="g-disabled" class="disabled-note" style="display:none">Sign-in is not configured yet.</div>
+
+  <div id="mine"></div>
+  <div id="err" class="err"></div>
+</div>
+
+<div id="admin-card" class="card" style="display:none">
+  <h2>All sessions</h2>
+  <div id="admin-sessions"></div>
+</div>
+
+<div id="history-card" class="card" style="display:none">
+  <h2>History</h2>
+  <div id="history-table"></div>
+</div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const $=i=>document.getElementById(i);
+let session=null, busy=false, t0=0;
+const EXPECT_START=210; // measured on the desktop stack: ~195s from apply to answering
+
+function fmtDur(s){
+  const m=Math.floor(s/60), h=Math.floor(m/60);
+  return h?`${h}h ${m%60}m`:`${m}m`;
+}
+function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+function renderMine(s){
+  const box=$('mine');
+  if(!session){ box.innerHTML=''; return; }
+  const mine=s.my_session;
+  if(!mine || mine.status==='error'){
+    box.innerHTML = `
+      <label><input type="checkbox" id="persist"> Keep my data after destroy</label>
+      <div class="row"><button id="start" class="go">Start my desktop</button></div>`;
+    $('start').onclick=()=>go('start');
+    return;
   }
-  $('g-disabled').style.display = s.google_client_id ? 'none' : 'block';
+  if(mine.status==='pending'){
+    box.innerHTML = `<div><span class="dot work"></span> Starting…</div>`;
+    return;
+  }
+  const label = mine.status==='active' ? 'Running' : 'Booting…';
+  let html = `<div><span class="dot ${mine.status==='active'?'up':'work'}"></span> ${label}</div>`;
+  if(mine.password) html += `<div class="cred">password: ${esc(mine.password)}</div>`;
+  if(mine.url) html += `<a class="open" href="${esc(mine.url)}" target="_blank">Open desktop &rarr;</a>`;
+  html += `<div class="row"><button id="destroy" class="stop">Destroy</button></div>`;
+  box.innerHTML = html;
+  $('destroy').onclick=()=>go('destroy');
+}
 
-  session = s.session || null;
-  $('g-anon').style.display = session ? 'none' : (s.google_client_id ? 'flex' : 'none');
-  $('g-signed').style.display = session ? 'flex' : 'none';
-  if(session) $('g-email').textContent = session.email;
+function renderAdmin(s){
+  if(!session || !session.is_admin){ $('admin-card').style.display='none'; $('history-card').style.display='none'; return; }
+  $('admin-card').style.display='block';
+  $('history-card').style.display='block';
 
-  const grid=$('g-slots'); grid.innerHTML='';
-  for(const name of ['a','b']){
-    const slot=(s.slots||{})[name]||{status:'idle'};
-    const mine = session && slot.user_id===session.user_id;
-    const div=document.createElement('div'); div.className='slot-card';
-    let body=`<h3>SLOT ${name.toUpperCase()}</h3>`;
-    if(slot.status==='idle'||slot.status==='error'){
-      body+=`<div>Free</div>`;
-      body+=`<div class="row" style="margin-top:.6rem">
-        <button class="go" ${session?'':'disabled'} onclick="guestStart('${name}')">Start here</button>
-      </div>
-      <label style="margin-top:.5rem"><input type="checkbox" id="persist-${name}"> Keep my data after destroy</label>`;
-    } else if(slot.status==='pending'){
-      body+=`<div class="dot work" style="display:inline-block;margin-right:.4rem"></div>Starting…`;
-    } else if(slot.status==='ready'||slot.status==='active'){
-      body+=`<div>${slot.status==='active'?'Running':'Booting…'}</div>`;
-      body+=`<div class="who">${slot.email||''}</div>`;
-      if(mine && slot.password) body+=`<div class="cred">pass: ${slot.password}</div>`;
-      if(slot.url) body+=`<a class="open on" href="${slot.url}" target="_blank">Open →</a>`;
-      if(mine || (session&&session.is_admin)){
-        body+=`<div class="row" style="margin-top:.6rem"><button class="stop" onclick="guestDestroy('${name}')">Destroy</button></div>`;
-      }
+  const entries=Object.entries(s.sessions||{});
+  $('admin-sessions').innerHTML = entries.length ? '' : '<div class="sub">Nobody running right now.</div>';
+  for(const [uname,sess] of entries){
+    const row=document.createElement('div'); row.className='sess-row';
+    row.innerHTML = `<div><strong>${esc(uname)}</strong><div class="who">${esc(sess.email||'')} · ${esc(sess.status)}</div></div>`;
+    if(sess.status==='active'||sess.status==='ready'){
+      const btn=document.createElement('button'); btn.className='stop'; btn.textContent='Destroy';
+      btn.onclick=()=>adminDestroy(uname);
+      row.appendChild(btn);
     }
-    div.innerHTML=body; grid.appendChild(div);
+    $('admin-sessions').appendChild(row);
+  }
+  if(typeof s.active_count==='number' && typeof s.max_concurrent==='number'){
+    const note=document.createElement('div'); note.className='sub'; note.style.marginTop='.6rem';
+    note.textContent=`${s.active_count} / ${s.max_concurrent} concurrent`;
+    $('admin-sessions').appendChild(note);
+  }
+
+  fetch('api/history').then(r=>r.ok?r.json():{events:[]}).then(({events})=>{
+    const rows=(events||[]).slice(0,50).map(e=>`
+      <tr><td>${new Date(e.ts*1000).toLocaleString()}</td><td>${esc(e.event)}</td>
+      <td>${esc(e.username||'')}</td><td>${esc(e.email||'')}</td>
+      <td>${e.duration_s!=null?fmtDur(e.duration_s):''}</td></tr>`).join('');
+    $('history-table').innerHTML = `<table><tr><th>when</th><th>event</th><th>user</th><th>email</th><th>duration</th></tr>${rows}</table>`;
+  }).catch(()=>{});
+}
+
+async function poll(){
+  try{
+    const s=await (await fetch('api/status',{cache:'no-store'})).json();
+    if(s.google_client_id && !window.__gRendered){
+      window.__gRendered=true;
+      google.accounts.id.initialize({client_id:s.google_client_id, callback:onGoogleCredential});
+      google.accounts.id.renderButton($('g-anon'), {theme:'filled_black', size:'large'});
+    }
+    $('g-disabled').style.display = s.google_client_id ? 'none' : 'block';
+    session = s.session || null;
+    $('g-anon').style.display = session ? 'none' : (s.google_client_id ? 'flex' : 'none');
+    $('g-signed').style.display = session ? 'flex' : 'none';
+    if(session) $('g-email').textContent = session.email;
+
+    if(busy && session && s.my_session && s.my_session.status==='active'){
+      busy=false; location.href=s.my_session.url;
+    }
+    renderMine(s);
+    renderAdmin(s);
+  }catch(e){
+    $('err').textContent='status unreachable: '+e.message;
   }
 }
 
 function onGoogleCredential(resp){
   fetch('api/google-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential:resp.credential})})
     .then(r=>{ if(!r.ok) throw new Error('sign-in rejected'); return r.json() })
-    .catch(e=>{$('g-err').textContent=e.message});
+    .catch(e=>{$('err').textContent=e.message});
 }
 $('g-signout').onclick=()=>fetch('api/google-logout',{method:'POST'});
 
-window.guestStart=(slot)=>{
-  $('g-err').textContent='';
-  const persist=$('persist-'+slot)?.checked||false;
-  fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start',slot,persist})})
-    .then(async r=>{ if(!r.ok) $('g-err').textContent=await r.text() });
-};
-window.guestDestroy=(slot)=>{
-  if(!confirm('Destroy this desktop?'))return;
-  $('g-err').textContent='';
-  fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'destroy',slot})})
-    .then(async r=>{ if(!r.ok) $('g-err').textContent=await r.text() });
-};
+async function go(action){
+  $('err').textContent='';
+  const body={action, guest:true};
+  if(action==='start') body.persist = $('persist')?.checked||false;
+  if(action==='destroy' && !confirm('Destroy your desktop? Your data survives only if you kept it.')) return;
+  busy = action==='start';
+  try{
+    const r=await fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok){ busy=false; $('err').textContent=await r.text(); }
+  }catch(e){ busy=false; $('err').textContent=e.message; }
+}
+async function adminDestroy(username){
+  if(!confirm(`Destroy ${username}'s desktop?`)) return;
+  await fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'destroy', guest:true, username})});
+}
 
 poll();setInterval(poll,5000);
 </script>
@@ -667,24 +803,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/")
         if path in ("", "/index.html"):
-            return self._send(200, PAGE, "text/html; charset=utf-8")
+            host = self.headers.get("Host", "").split(":")[0]
+            page = DESKTOP_PAGE if host == "desktop.mnour.dev" else PAGE
+            return self._send(200, page, "text/html; charset=utf-8")
 
         if path == "/api/status":
             session = self._session()
-            slots = refresh_slots(_load_slots())
-            public_slots = {}
-            for name, s in slots.items():
-                entry = {"status": s.get("status", "idle")}
-                if s.get("status") in ("pending", "ready", "active"):
-                    entry["user_id"] = s.get("user_id")
-                    entry["email"] = s.get("email")
-                    entry["url"] = s.get("url")
-                    entry["status"] = s.get("status")
-                    # Password only ever goes to the owning session, or the
-                    # admin - never broadcast to every visitor polling status.
-                    if session and (session.get("user_id") == s.get("user_id") or session.get("is_admin")):
-                        entry["password"] = s.get("password")
-                public_slots[name] = entry
+            sessions = refresh_sessions(_load_sessions())
+
+            # Non-admins see only their own session (if any) plus the
+            # concurrency state needed to render "start" as available or
+            # not - never anyone else's email, URL or password. The admin
+            # sees every live session, which is the whole point of the
+            # elevated view.
+            visible = {}
+            for uname, s in sessions.items():
+                mine = session and session.get("user_id") == uname
+                if session and (mine or session.get("is_admin")):
+                    entry = dict(s)
+                    if not (mine or session.get("is_admin")):
+                        entry.pop("password", None)
+                    visible[uname] = entry
 
             out = {
                 "desktop_up": desktop_up(),
@@ -693,7 +832,10 @@ class Handler(BaseHTTPRequestHandler):
                 "hourly_usd": HOURLY_USD,
                 "google_client_id": GOOGLE_CLIENT_ID,
                 "session": session,
-                "slots": public_slots,
+                "my_session": sessions.get(session["user_id"]) if session else None,
+                "sessions": visible,
+                "active_count": active_count(sessions),
+                "max_concurrent": MAX_CONCURRENT if (session and session.get("is_admin")) else None,
             }
             if not token():
                 out["error"] = ("No GitHub token on the hub. Buttons are inert until "
@@ -772,41 +914,34 @@ class Handler(BaseHTTPRequestHandler):
     def _session_ready(self, req):
         if not self._bearer_ok(HUB_CALLBACK_SECRET):
             return self._send(403, json.dumps({"error": "bad callback secret"}))
-        slot = req.get("slot")
-        if slot not in SLOTS:
-            return self._send(400, json.dumps({"error": "bad slot"}))
-        slots = _load_slots()
-        prior = slots.get(slot, {})
-        started_at = time.time()
-        slots[slot] = {
+        username = req.get("username")
+        if not username:
+            return self._send(400, json.dumps({"error": "bad username"}))
+        sessions = _load_sessions()
+        prior = sessions.get(username, {})
+        sessions[username] = {
             "status": "ready",  # control panel still polls healthz before "active"
-            "user_id": prior.get("user_id"),
             "email": prior.get("email"),
             "url": req.get("url"),
             "password": req.get("password"),
-            "kill_at": req.get("kill_at"),
-            "started_at": started_at,
+            "started_at": time.time(),
         }
-        _save_slots(slots)
-        log_event("start", username=prior.get("user_id"), email=prior.get("email"),
-                   slot=slot, url=req.get("url"))
+        _save_sessions(sessions)
+        log_event("start", username=username, email=prior.get("email"), url=req.get("url"))
         return self._send(200, json.dumps({"ok": True}))
 
     def _session_ended(self, req):
         if not self._bearer_ok(HUB_CALLBACK_SECRET):
             return self._send(403, json.dumps({"error": "bad callback secret"}))
-        slot = req.get("slot")
-        if slot not in SLOTS:
-            return self._send(400, json.dumps({"error": "bad slot"}))
-        slots = _load_slots()
-        prior = slots.get(slot, {})
-        duration_s = None
-        if prior.get("started_at"):
-            duration_s = round(time.time() - prior["started_at"])
-        slots[slot] = {"status": "idle"}
-        _save_slots(slots)
-        log_event("destroy", username=prior.get("user_id"), email=prior.get("email"),
-                   slot=slot, duration_s=duration_s, reason=req.get("reason", "manual"))
+        username = req.get("username")
+        if not username:
+            return self._send(400, json.dumps({"error": "bad username"}))
+        sessions = _load_sessions()
+        prior = sessions.pop(username, {})
+        duration_s = round(time.time() - prior["started_at"]) if prior.get("started_at") else None
+        _save_sessions(sessions)
+        log_event("destroy", username=username, email=prior.get("email"),
+                   duration_s=duration_s, reason=req.get("reason", "manual"))
         return self._send(200, json.dumps({"ok": True}))
 
     # -- Start / destroy -----------------------------------------------------
@@ -817,10 +952,11 @@ class Handler(BaseHTTPRequestHandler):
         if not wf:
             return self._send(400, json.dumps({"error": "unknown action"}))
 
-        slot = req.get("slot")
-        if slot is None:
-            # The owner's original, unchanged path - no slot, no session
-            # required. Basic auth in front of the whole hub is the gate.
+        if not req.get("guest"):
+            # The owner's original, unchanged path - no session required.
+            # Basic auth in front of the whole hub is the gate. Nothing on
+            # hub.mnour.dev sends "guest", so this path is untouched by
+            # anything below it.
             if action == "start":
                 inputs = {
                     "username": str(req.get("username") or "mnour"),
@@ -830,48 +966,57 @@ class Handler(BaseHTTPRequestHandler):
                 inputs = {"confirm": "DESTROY"}
             return self._trigger(wf, inputs)
 
-        # Guest path - requires a real session from here on.
-        if slot not in SLOTS:
-            return self._send(400, json.dumps({"error": "bad slot"}))
+        # Guest path - requires a real session from here on. The username
+        # is NEVER taken from the request body for the caller's own
+        # actions - always from their verified session, so nobody can
+        # start or destroy a desktop under someone else's name.
         session = self._session()
         if not session:
             return self._send(401, json.dumps({"error": "sign in first"}))
+        my_username = session["user_id"]
 
-        slots = _load_slots()
-        current = slots.get(slot, {"status": "idle"})
+        sessions = _load_sessions()
 
         if action == "start":
-            if current.get("status") not in ("idle", "error"):
-                return self._send(409, json.dumps({"error": "that slot is in use"}))
-            # One running slot per guest - stops a single sign-in from
-            # occupying both, which would otherwise defeat the 2-slot cap.
-            for name, s in slots.items():
-                if s.get("user_id") == session["user_id"] and s.get("status") in ("pending", "ready", "active"):
-                    return self._send(409, json.dumps({"error": "you already have a desktop running"}))
+            current = sessions.get(my_username, {})
+            if current.get("status") in ("pending", "ready", "active"):
+                return self._send(409, json.dumps({"error": "you already have a desktop running"}))
 
-            slots[slot] = {
+            if active_count(sessions) >= MAX_CONCURRENT:
+                # Deliberately generic - the exact ceiling is not something
+                # a user needs to know, only that now is not the moment.
+                return self._send(503, json.dumps({"error": "all desktops are busy right now - try again shortly"}))
+
+            sessions[my_username] = {
                 "status": "pending",
-                "user_id": session["user_id"],
                 "email": session["email"],
                 "dispatched_at": time.time(),
             }
-            _save_slots(slots)
+            _save_sessions(sessions)
+            log_event("login_start", username=my_username, email=session["email"])
             inputs = {
-                "username": session["user_id"],
+                "username": my_username,
                 "fresh": "false",
-                "slot": slot,
-                "user_id": session["user_id"],
+                "guest_username": my_username,
                 "owner_email": session["email"],
                 "persist": "true" if req.get("persist") else "false",
-                "session_hours": "4",
             }
             return self._trigger(wf, inputs)
 
         if action == "destroy":
-            owns_it = current.get("user_id") == session["user_id"]
-            if not (owns_it or session.get("is_admin")):
+            # A non-admin naming someone else's username gets a clear 403,
+            # not a silent redirect onto their own session - that earlier
+            # shape technically couldn't be exploited (a non-admin's target
+            # was forced to their own username before the ownership check
+            # ever ran, so the check was dead code) but it meant a bad
+            # request destroyed the CALLER's own desktop with no indication
+            # why, which is a confusing way to fail even when it is safe.
+            target = req.get("username") or my_username
+            if target != my_username and not session.get("is_admin"):
                 return self._send(403, json.dumps({"error": "not your session"}))
-            return self._trigger(wf, {"confirm": "DESTROY", "slot": slot})
+            if target not in sessions:
+                return self._send(404, json.dumps({"error": "no such session"}))
+            return self._trigger(wf, {"confirm": "DESTROY", "guest_username": target})
 
         return self._send(400, json.dumps({"error": "unknown action"}))
 

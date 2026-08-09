@@ -217,3 +217,19 @@ variable "user_volume_id" {
   type        = string
   default     = ""
 }
+
+variable "cloudflare_dns_api_token" {
+  description = <<-EOT
+    Lets Caddy prove domain ownership via a DNS-01 TXT record instead of the
+    default HTTP-01 challenge. Each username already has its own hostname
+    now, so a normal user restarting their own desktop does not approach the
+    5-certificates-per-hostname-per-168h limit the way rebuilding one shared
+    hostname repeatedly did earlier in this project - this is not fixing
+    that failure mode again, it is not depending on port 80 being reachable
+    during the challenge, which matters if this ever sits behind a Tunnel
+    with no open inbound ports at all.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}

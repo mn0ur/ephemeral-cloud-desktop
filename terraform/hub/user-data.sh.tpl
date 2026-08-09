@@ -13,6 +13,8 @@ echo "=== hub bootstrap start $(date -Is) ==="
 HOSTNAME_FQDN="${hostname}"
 TS_KEY="${tailscale_auth_key}"
 PERSIST="/mnt/hubdata"
+CF_DNS_TOKEN="${cloudflare_dns_api_token}"
+DESKTOP_ZONE="${cloudflare_zone}"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -20,12 +22,53 @@ apt-get install -y ca-certificates curl gnupg jq apache2-utils python3 \
   debian-keyring debian-archive-keyring apt-transport-https
 apt-get install -y --no-install-recommends docker.io docker-compose-v2
 
-curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  > /etc/apt/sources.list.d/caddy-stable.list
-apt-get update -y
-apt-get install -y caddy
+if [ -n "$CF_DNS_TOKEN" ]; then
+  # Same reasoning as the desktop stack: DNS-01 via Cloudflare needs a
+  # Caddy build with the cloudflare-dns module compiled in, which stock
+  # apt Caddy does not have. Caddy's own build service produces one -
+  # no local Go toolchain, no xcaddy.
+  echo "fetching Caddy with the Cloudflare DNS module"
+  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64&p=github.com/caddy-dns/cloudflare" \
+    -o /usr/bin/caddy
+  chmod 755 /usr/bin/caddy
+  id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
+  mkdir -p /etc/caddy /var/lib/caddy
+  chown -R caddy:caddy /var/lib/caddy
+  cat >/etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy (custom build - caddy-dns/cloudflare)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  mkdir -p /etc/systemd/system/caddy.service.d
+  cat >/etc/systemd/system/caddy.service.d/cloudflare-token.conf <<TOKENCONF
+[Service]
+Environment=CF_API_TOKEN=$CF_DNS_TOKEN
+TOKENCONF
+  chmod 600 /etc/systemd/system/caddy.service.d/cloudflare-token.conf
+else
+  curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+    > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -y
+  apt-get install -y caddy
+fi
 
 # ---------------------------------------------------------------------------
 # Persistent volume. Uptime Kuma's history is the asset here - losing it to an
@@ -263,20 +306,26 @@ case "$HASH" in
   *) echo "FATAL: caddy hash-password returned an unexpected format"; exit 1 ;;
 esac
 
-cat >/etc/caddy/Caddyfile <<'CADDY'
+# Empty when no Cloudflare token was supplied - falls back to the default
+# HTTP-01 challenge, unchanged from before desktop.mnour.dev existed.
+TLS_BLOCK=""
+if [ -n "$CF_DNS_TOKEN" ]; then
+  TLS_BLOCK="	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+"
+fi
+
+cat >/etc/caddy/Caddyfile <<CADDY
 __HOSTNAME__ {
 	encode zstd gzip
 
-	# Machine-to-machine callbacks from GitHub Actions - authenticated by
-	# their own bearer secret inside control.py, never by this dashboard
-	# password. Actions has no way to supply that password, so a bare
-	# basic_auth block here would 401 every callback before control.py
-	# ever saw the request - found the hard way, on the first real guest
-	# session: Google sign-in worked, slot allocation worked, and the
-	# session-ready callback that hands back the guest's URL and password
-	# silently died at this exact wall.
-	@needs_auth not path /control/api/session-ready /control/api/session-ended
-	basic_auth @needs_auth {
+	# Guest callbacks from GitHub Actions used to have to be exempted from
+	# this basic_auth - they now go to desktop.$DESKTOP_ZONE instead, which
+	# has no basic_auth at all (Google sign-in is its access control), so
+	# this dashboard's own auth can stay simple: everything on it needs
+	# the password, no exceptions.
+	basic_auth {
 		mnour __HASH__
 	}
 
@@ -293,6 +342,17 @@ __HOSTNAME__ {
 	handle {
 		reverse_proxy 127.0.0.1:3000
 	}
+}
+
+desktop.$DESKTOP_ZONE {
+$TLS_BLOCK	encode zstd gzip
+
+	# No basic_auth on this site at all - Google sign-in plus the
+	# admin-email check inside control.py IS the access control here.
+	# The GitHub Actions callbacks (session-ready, session-ended) also
+	# rely on there being no basic_auth wall in front of them, same
+	# lesson as hub.mnour.dev learned the hard way earlier.
+	reverse_proxy 127.0.0.1:8000
 }
 CADDY
 

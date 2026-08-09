@@ -28,39 +28,32 @@ on:
         description: "Instance type. Must be non-burstable - t-family throttles under video encoding."
         required: false
         default: "c7i.xlarge"
-      # Everything below is for the guest self-service control panel, not for
-      # a human clicking "Run workflow". Left at their defaults, this run is
-      # the owner's own desktop, unchanged from before these existed.
-      slot:
-        description: "\"\" for the owner's own desktop, or \"a\"/\"b\" for a guest slot."
+      # Everything below is for the guest self-service control panel at
+      # desktop.mnour.dev, not for a human clicking "Run workflow". Left at
+      # their defaults, this run is the owner's own desk.mnour.dev desktop,
+      # unchanged from before this section existed.
+      guest_username:
+        description: "Empty for the owner's own desktop, or a username (from Google sign-in) for a per-user desktop at <username>.desktop.mnour.dev."
         required: false
         default: ""
-      user_id:
-        description: "Guest identifier (from Google sign-in). Ignored when slot is empty."
-        required: false
-        default: "mnour"
       owner_email:
-        description: "Guest email, for tagging only."
+        description: "Guest email, for tagging and the history log only."
         required: false
         default: ""
       persist:
         description: "Guest chose to keep their data after destroy."
         type: boolean
         default: false
-      session_hours:
-        description: "Guest session auto-destroy limit, in hours. Ignored when slot is empty - the owner's own desktop is never force-killed."
-        required: false
-        default: "4"
 
 permissions:
   contents: read
 
 concurrency:
-  # Per-slot, not global: a guest slot-b start must never queue behind a
-  # slot-a start, and neither may race a second apply targeting the SAME
-  # slot. Empty slot -> "desktop-lifecycle-", the owner's own group,
-  # unchanged from before slots existed.
-  group: desktop-lifecycle-${{ inputs.slot }}
+  # Per-username, not global: two different guests must never queue behind
+  # each other, and neither may race a second apply targeting the SAME
+  # username. Empty username -> "desktop-lifecycle-", the owner's own group,
+  # unchanged from before this section existed.
+  group: desktop-lifecycle-${{ inputs.guest_username }}
   cancel-in-progress: false
 
 jobs:
@@ -90,11 +83,11 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
           echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
 
-      - name: Guest-only setup (volume, password, kill time)
-        if: inputs.slot != ''
+      - name: Guest-only setup (volume, password)
+        if: inputs.guest_username != ''
         run: |
           set -euo pipefail
-          USER_ID="${{ inputs.user_id }}"
+          GUEST_USERNAME="${{ inputs.guest_username }}"
 
           # A guest who wants to keep their data gets ONE volume, reused on
           # every future session. A Terraform data source cannot express
@@ -102,17 +95,17 @@ jobs:
           # happens here, with real AWS credentials, before apply runs at all.
           if [ "${{ inputs.persist }}" = "true" ]; then
             VOL_ID=$(aws ec2 describe-volumes \
-              --filters "Name=tag:Owner,Values=$USER_ID" "Name=tag:Role,Values=desktop-guest-data" \
+              --filters "Name=tag:Owner,Values=$GUEST_USERNAME" "Name=tag:Role,Values=desktop-guest-data" \
               --query 'Volumes[0].VolumeId' --output text)
             if [ "$VOL_ID" = "None" ] || [ -z "$VOL_ID" ]; then
               VOL_ID=$(aws ec2 create-volume \
                 --region eu-central-1 --availability-zone eu-central-1a \
                 --size 15 --volume-type gp3 --encrypted \
-                --tag-specifications "ResourceType=volume,Tags=[{Key=Owner,Value=$USER_ID},{Key=Role,Value=desktop-guest-data},{Key=ManagedBy,Value=workflow}]" \
+                --tag-specifications "ResourceType=volume,Tags=[{Key=Owner,Value=$GUEST_USERNAME},{Key=Role,Value=desktop-guest-data},{Key=ManagedBy,Value=workflow}]" \
                 --query VolumeId --output text)
-              echo "created guest volume $VOL_ID for $USER_ID"
+              echo "created guest volume $VOL_ID for $GUEST_USERNAME"
             else
-              echo "reusing existing guest volume $VOL_ID for $USER_ID"
+              echo "reusing existing guest volume $VOL_ID for $GUEST_USERNAME"
             fi
             echo "TF_VAR_user_volume_id=$VOL_ID" >> "$GITHUB_ENV"
           else
@@ -126,36 +119,29 @@ jobs:
           echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
           echo "::add-mask::$GUEST_PASSWORD"
 
-          # Stamped once at launch, read later by desktop-reaper.yml. Computed
-          # here (not in Terraform) because Terraform has no clock function
-          # that survives a resumed/unchanged plan predictably.
-          KILL_AT="$(date -u -d "+${{ inputs.session_hours }} hours" +%Y-%m-%dT%H:%M:%SZ)"
-          echo "TF_VAR_kill_at=$KILL_AT" >> "$GITHUB_ENV"
-          echo "session will be force-destroyed at $KILL_AT if not ended sooner"
-
       - name: terraform apply
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_web_user: ${{ inputs.username }}
           TF_VAR_fresh: ${{ inputs.fresh }}
           TF_VAR_instance_type: ${{ inputs.instance_type }}
-          TF_VAR_slot: ${{ inputs.slot }}
-          TF_VAR_user_id: ${{ inputs.user_id }}
+          TF_VAR_username: ${{ inputs.guest_username }}
           TF_VAR_owner_email: ${{ inputs.owner_email }}
+          TF_VAR_cloudflare_dns_api_token: ${{ inputs.guest_username != '' && secrets.CLOUDFLARE_API_TOKEN || '' }}
         run: |
           KEY="desktop/terraform.tfstate"
-          if [ -n "${{ inputs.slot }}" ]; then
-            KEY="desktop/slot-${{ inputs.slot }}/terraform.tfstate"
+          if [ -n "${{ inputs.guest_username }}" ]; then
+            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
           fi
           terraform -chdir=terraform init -input=false -backend-config="key=$KEY"
           terraform -chdir=terraform apply -auto-approve -input=false
 
-      - name: Tell the hub the guest session is ready
+      - name: Tell desktop.mnour.dev the guest session is ready
         # The control panel holds no AWS or Terraform credentials - by design,
         # so a compromised panel can never touch infrastructure directly. It
         # cannot read `terraform output` itself, so the guest's URL and
         # password have to be handed to it here, once, right after apply.
-        if: inputs.slot != ''
+        if: inputs.guest_username != ''
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
         run: |
@@ -166,13 +152,11 @@ jobs:
             exit 1
           fi
           PAYLOAD=$(jq -n \
-            --arg slot "${{ inputs.slot }}" \
-            --arg user_id "${{ inputs.user_id }}" \
+            --arg username "${{ inputs.guest_username }}" \
             --arg url "$URL" \
             --arg password "$PASSWORD" \
-            --arg kill_at "${KILL_AT:-}" \
-            '{slot:$slot, user_id:$user_id, url:$url, password:$password, kill_at:$kill_at}')
-          curl -fsS -X POST "https://hub.mnour.dev/control/api/session-ready" \
+            '{username:$username, url:$url, password:$password}')
+          curl -fsS -X POST "https://desktop.mnour.dev/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"

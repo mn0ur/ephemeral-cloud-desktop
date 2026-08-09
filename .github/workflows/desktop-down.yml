@@ -7,8 +7,8 @@ on:
         description: 'Type DESTROY to confirm'
         required: true
         default: ""
-      slot:
-        description: "\"\" for the owner's own desktop, or \"a\"/\"b\" for a guest slot."
+      guest_username:
+        description: "Empty for the owner's own desktop, or the username of a per-user desktop to destroy."
         required: false
         default: ""
 
@@ -16,9 +16,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Must match the formula in desktop-up.yml exactly, or a slot-a destroy
-  # could race a slot-a start while leaving slot-b free to run in parallel.
-  group: desktop-lifecycle-${{ inputs.slot }}
+  # Must match the formula in desktop-up.yml exactly, or a destroy could
+  # race a start for the SAME username while a different username runs
+  # in parallel undisturbed.
+  group: desktop-lifecycle-${{ inputs.guest_username }}
   cancel-in-progress: false
 
 jobs:
@@ -62,29 +63,30 @@ jobs:
       - name: terraform destroy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TF_VAR_slot: ${{ inputs.slot }}
+          TF_VAR_username: ${{ inputs.guest_username }}
+          TF_VAR_cloudflare_dns_api_token: ${{ inputs.guest_username != '' && secrets.CLOUDFLARE_API_TOKEN || '' }}
         run: |
           KEY="desktop/terraform.tfstate"
-          if [ -n "${{ inputs.slot }}" ]; then
-            KEY="desktop/slot-${{ inputs.slot }}/terraform.tfstate"
+          if [ -n "${{ inputs.guest_username }}" ]; then
+            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
           fi
           terraform -chdir=terraform init -input=false -backend-config="key=$KEY"
           terraform -chdir=terraform destroy -auto-approve -input=false
 
-      - name: Tell the hub this slot is free
-        if: inputs.slot != ''
+      - name: Tell desktop.mnour.dev this username is free
+        if: inputs.guest_username != ''
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
         run: |
           if [ -z "$HUB_CALLBACK_SECRET" ]; then
-            echo "::warning::HUB_CALLBACK_SECRET not set - the control panel will not learn this slot freed up until its next status poll notices /healthz stopped answering."
+            echo "::warning::HUB_CALLBACK_SECRET not set - the control panel will not learn this session ended until its next status poll notices /healthz stopped answering."
             exit 0
           fi
-          curl -fsS -X POST "https://hub.mnour.dev/control/api/session-ended" \
+          curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
-            -d "{\"slot\":\"${{ inputs.slot }}\"}" \
-            || echo "::warning::callback to hub failed - non-fatal, destroy already succeeded"
+            -d "{\"username\":\"${{ inputs.guest_username }}\",\"reason\":\"manual\"}" \
+            || echo "::warning::callback failed - non-fatal, destroy already succeeded"
 
       - name: Confirm nothing billable is left
         run: |

@@ -293,7 +293,15 @@ resource "aws_instance" "desktop" {
   key_name               = var.enable_ssh ? aws_key_pair.desktop[0].key_name : null
 
   user_data_replace_on_change = true
-  user_data = templatefile("${path.module}/user-data.sh.tpl", {
+
+  # base64gzip, not plain user_data. AWS caps user data at 16KB and this
+  # script crossed it (18435 bytes) the first time a real guest desktop was
+  # started - the apply failed outright with "expected length of user_data to
+  # be in the range (0 - 16384)". cloud-init detects and decompresses gzipped
+  # user data automatically, and a shell script compresses ~2.7x (18KB ->
+  # 6.9KB), so this keeps every hard-won comment in the script instead of
+  # deleting documentation to buy back bytes.
+  user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tpl", {
     hostname                 = local.effective_hostname
     image                    = var.image
     timezone                 = var.timezone
@@ -303,7 +311,7 @@ resource "aws_instance" "desktop" {
     framerate                = var.framerate
     fresh                    = var.fresh ? "true" : "false"
     cloudflare_dns_api_token = var.cloudflare_dns_api_token
-  })
+  }))
 
   root_block_device {
     volume_size           = var.root_volume_gb

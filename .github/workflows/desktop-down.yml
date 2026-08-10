@@ -26,6 +26,14 @@ jobs:
   destroy:
     name: terraform destroy
     runs-on: ubuntu-latest
+
+    # Measured: 119s total, 109s of it inside "terraform destroy" - and a
+    # large part of that is `terraform init` re-downloading providers. Same
+    # cache and same key as desktop-up.yml, so a start warms the cache that
+    # the following destroy then hits.
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
+
     steps:
       # A typed confirmation, because this is one click away from tearing down
       # a running machine someone might be working in.
@@ -41,6 +49,15 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.7
+
+      - name: Prepare provider cache dir
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.tf-plugin-cache
+          key: tf-providers-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+          restore-keys: tf-providers-
 
       - name: Configure AWS
         env:

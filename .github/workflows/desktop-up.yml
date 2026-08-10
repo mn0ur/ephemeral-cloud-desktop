@@ -60,12 +60,31 @@ jobs:
   start:
     name: terraform apply
     runs-on: ubuntu-latest
+
+    # Measured on run 31376162950: the job took 112s, and 87s of that was the
+    # single "terraform apply" step - most of it `terraform init` downloading
+    # the same providers from scratch, every run. The AWS provider alone is
+    # ~200MB+. Caching them by lockfile hash means a cache hit skips the
+    # download entirely, and the lockfile is exactly the right key: it changes
+    # if and only if a provider version changes.
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.7
+
+      - name: Cache Terraform providers
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.tf-plugin-cache
+          key: tf-providers-${{ hashFiles('terraform/.terraform.lock.hcl') }}
+          restore-keys: tf-providers-
 
       - name: Configure AWS
         env:

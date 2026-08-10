@@ -17,13 +17,21 @@ Eight criteria. Each is testable by observation, not opinion.
 
 1. A **non-admin** Google account signs in at `desktop.mnour.dev`, clicks Start,
    and reaches a working desktop at `<username>.desktop.mnour.dev`.
+   (`n4mu0r@gmail.com` is already registered as a non-admin user, so this is
+   testable without creating a new account.)
 2. With *keep my data* on: a marker file and an `apt`-installed package **survive
    destroy → restart**, reusing the same EBS volume.
 3. With *keep my data* off: **no volume is ever created** — verified by its
    absence in the AWS API, not assumed from the absence of an error.
 4. A user can destroy **their own** desktop and **cannot** destroy anyone else's.
 5. The **admin** (`mnuowr@gmail.com`) sees all sessions and history and can
-   destroy any desktop. The admin's own desktop is never auto-destroyed.
+   destroy any desktop.
+
+   *(The original requirement also said the admin's desktop must never be
+   auto-destroyed. That is moot while D2 holds — nothing is auto-destroyed at
+   all. It becomes a real requirement again the moment any reaper is
+   re-enabled, and the mechanism then is an `IdleExempt` / owner-aware tag the
+   reaper skips, not a username hardcoded into the workflow.)*
 6. Concurrency capped at 5. A 6th user sees "try again shortly" with no number
    disclosed.
 7. Every login / start / destroy is recorded in history, with duration on destroy.

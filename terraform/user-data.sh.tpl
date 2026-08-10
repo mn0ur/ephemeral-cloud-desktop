@@ -307,9 +307,6 @@ docker exec webtop bash -lc "chfn -f '${web_user}' abc 2>/dev/null || true; \
 # Caddy. The container listens on loopback only, so Caddy is the sole ingress
 # and TLS cannot be bypassed by hitting the port directly.
 # ---------------------------------------------------------------------------
-mkdir -p /var/log/caddy
-chown caddy:caddy /var/log/caddy
-
 # Empty when no Cloudflare token was supplied - the owner's own desktop
 # gets no tls block at all, and Caddy falls back to its HTTP-01 default,
 # byte-identical to how this worked before DNS-01 existed.
@@ -324,10 +321,6 @@ fi
 cat >/etc/caddy/Caddyfile <<CADDY
 $HOSTNAME_FQDN {
 $TLS_BLOCK	encode zstd gzip
-
-	log {
-		output file /var/log/caddy/access.log
-	}
 
 	# Unauthenticated liveness probe. The desktop itself answers 401 when it
 	# is perfectly healthy - that is the login prompt - and most monitors
@@ -381,9 +374,19 @@ systemctl daemon-reload
 # at all, with nothing in the logs pointing at why. Validate first, so a bad
 # Caddyfile (the DNS-01 tls block above is new tonight, and new is exactly
 # when this is most likely) fails loudly here instead of silently offline.
-if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+# CF_API_TOKEN must be in the ENVIRONMENT of this validate call. The Caddyfile
+# references {env.CF_API_TOKEN}, and the real token reaches Caddy only through
+# a systemd drop-in - which a bare shell command does not see. Validating
+# without it therefore reports a PERFECTLY VALID config as invalid:
+#
+#   API token '' appears invalid; ensure it's correctly entered
+#
+# and this gate then exits 1 before Caddy is ever started, leaving the desktop
+# answering ERR_CONNECTION_REFUSED with a config that was fine all along. That
+# happened on two separate real desktops before the cause was pinned down.
+if ! CF_API_TOKEN="$CF_DNS_TOKEN" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
   echo "FATAL: generated Caddyfile is invalid - refusing to start Caddy."
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || true
+  CF_API_TOKEN="$CF_DNS_TOKEN" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || true
   exit 1
 fi
 

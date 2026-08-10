@@ -1072,7 +1072,12 @@ async function wipeData(){
   // Two-step confirmation, because this is irreversible and there is no
   // snapshot behind it. A single confirm() is too easy to click through for
   // something that permanently deletes someone's files.
-  if(!confirm('Permanently delete your saved files?\n\nThis cannot be undone. Your next desktop starts clean.')) return;
+  // Note the doubled backslashes: this page is a Python triple-quoted string,
+  // so a single \\n would be turned into a real newline by Python and split
+  // this JS string literal across lines - a syntax error that kills the whole
+  // script, taking the Google sign-in button and every rendered section with
+  // it. The page still served, so it looked like a CSS or markup problem.
+  if(!confirm('Permanently delete your saved files?\\n\\nThis cannot be undone. Your next desktop starts clean.')) return;
   const typed = prompt('This is irreversible. Type DELETE to confirm:');
   if(typed !== 'DELETE'){ $('err').textContent='Not deleted - confirmation did not match.'; return; }
   $('err').textContent='';

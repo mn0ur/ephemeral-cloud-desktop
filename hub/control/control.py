@@ -852,12 +852,18 @@ function renderMine(s){
   const box=$('mine');
   if(!session){ box.innerHTML=''; return; }
   const mine=s.my_session;
-  // While an action we dispatched is still in flight and the server has not
-  // caught up yet, keep showing it. Without this the next 5s poll rendered
-  // the plain Start button straight over the top of "Starting…"/"Destroying…",
-  // so every action looked like it had done nothing at all.
-  if(busy && !mine){
+  // While an action we dispatched is still in flight, keep showing it -
+  // REGARDLESS of whether the session still exists.
+  //
+  // This was `busy && !mine`, which only held during a start. A destroy
+  // leaves the session in place for a minute or so while the instance
+  // terminates, so the next 5s poll re-rendered the normal card - complete
+  // with a live Destroy button - straight over the top of "Destroying...".
+  // The click looked ignored, so it got clicked again: three DESTROY runs
+  // fired for one desktop, two of them cancelled by the concurrency group.
+  if(busy){
     box.innerHTML = `<div><span class="dot work"></span> ${pending_action==='destroy'?'Destroying…':'Starting…'}</div>`
+      + `<div class="sub">${pending_action==='destroy'?'Terminating the instance. Your data is kept if you chose to keep it.':'This takes a few minutes.'}</div>`
       + stepsHtml(s.progress);
     return;
   }

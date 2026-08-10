@@ -23,6 +23,9 @@ echo "=== bootstrap start $(date -Is) ==="
 HOSTNAME_FQDN="${hostname}"
 IMAGE="${image}"
 FRESH="${fresh}"
+# When true, Cloudflare Access gates this hostname and the security group only
+# accepts Cloudflare's edge - so the desktop runs without its own password.
+ACCESS_ENABLED="${access_enabled}"
 PERSIST_ROOT="/mnt/persist"
 CONFIG_DIR="$PERSIST_ROOT/config"
 DOCKER_ROOT="$PERSIST_ROOT/docker"
@@ -276,6 +279,25 @@ if docker inspect webtop >/dev/null 2>&1; then
 else
   echo "creating a new desktop container"
   docker pull "$IMAGE"
+
+  # ACCESS_ENABLED=true means Cloudflare Access is enforcing identity at the
+  # edge AND the security group only accepts connections from Cloudflare, so
+  # there is no network path to this container that skips the Google check.
+  # A second password on top of that is pure friction: the user has already
+  # proved who they are to reach the hostname at all.
+  #
+  # Omitting CUSTOM_USER/PASSWORD makes linuxserver's image serve without its
+  # own auth. That is ONLY safe because of the security-group lock - see
+  # aws_vpc_security_group_ingress_rule.https_cloudflare_only. If that rule is
+  # ever loosened back to 0.0.0.0/0 while this is empty, the desktop becomes
+  # publicly open with no authentication whatsoever.
+  if [ "$ACCESS_ENABLED" = "true" ]; then
+    echo "Access is enforcing identity at the edge - starting without a desktop password"
+    AUTH_ENV=""
+  else
+    AUTH_ENV="-e CUSTOM_USER=${web_user} -e PASSWORD=${web_password}"
+  fi
+
   docker run -d \
     --name webtop \
     --restart unless-stopped \
@@ -286,8 +308,7 @@ else
     -e PUID=1000 \
     -e PGID=1000 \
     -e TZ='${timezone}' \
-    -e CUSTOM_USER='${web_user}' \
-    -e PASSWORD='${web_password}' \
+    $AUTH_ENV \
     -e SELKIES_AUDIO_ENABLED=true \
     -e SELKIES_MICROPHONE_ENABLED=true \
     -e SELKIES_CLIPBOARD_ENABLED=true \

@@ -146,10 +146,37 @@ resource "aws_vpc_security_group_ingress_rule" "http" {
   ip_protocol       = "tcp"
 }
 
+# Without Access: 443 open to the world, Caddy basic auth the only barrier.
 resource "aws_vpc_security_group_ingress_rule" "https" {
+  count = local.access_enabled ? 0 : 1
+
   security_group_id = aws_security_group.desktop.id
   description       = "webtop UI via Caddy"
   cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+}
+
+# With Access: 443 reachable ONLY from Cloudflare's own network.
+#
+# This is what makes removing the desktop password safe, and it is not
+# optional. Access is enforced by Cloudflare's edge - so if the origin still
+# accepted connections from anywhere, anyone who learned the instance's public
+# IP could connect straight to it with the correct Host header and bypass the
+# identity check completely. Locking the origin to Cloudflare's ranges means
+# there is no network path to the desktop that skips Access.
+#
+# Ranges come from the provider's own data source rather than a hardcoded
+# list, so they follow Cloudflare's published set instead of going stale.
+data "cloudflare_ip_ranges" "cloudflare" {}
+
+resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
+  for_each = local.access_enabled ? toset(data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks) : toset([])
+
+  security_group_id = aws_security_group.desktop.id
+  description       = "webtop UI via Caddy - Cloudflare edge only (Access enforced there)"
+  cidr_ipv4         = each.value
   from_port         = 443
   to_port           = 443
   ip_protocol       = "tcp"
@@ -311,6 +338,7 @@ resource "aws_instance" "desktop" {
     framerate                = var.framerate
     fresh                    = var.fresh ? "true" : "false"
     cloudflare_dns_api_token = var.cloudflare_dns_api_token
+    access_enabled           = local.access_enabled ? "true" : "false"
   }))
 
   root_block_device {

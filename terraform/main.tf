@@ -411,16 +411,20 @@ resource "null_resource" "dns" {
     # stripping one label worked for desk.mnour.sd and broke silently for
     # mnuowr.desktop.mnour.dev, which has an extra label - see set-dns.sh.
     zone = var.cloudflare_zone
+    # Access can only gate a PROXIED hostname, so the record's proxy setting
+    # has to follow enable_access. Kept in triggers because destroy-time
+    # provisioners may only reference self.triggers.
+    proxied = local.access_enabled ? "true" : "false"
   }
 
   provisioner "local-exec" {
-    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.ip}' '${self.triggers.zone}'"
+    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.ip}' '${self.triggers.zone}' '${self.triggers.proxied}'"
     interpreter = ["bash", "-c"]
   }
 
   provisioner "local-exec" {
     when        = destroy
-    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.parked}' '${self.triggers.zone}'"
+    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.parked}' '${self.triggers.zone}' '${self.triggers.proxied}'"
     interpreter = ["bash", "-c"]
     # Never let a DNS hiccup block a teardown - the instance must still go.
     on_failure = continue

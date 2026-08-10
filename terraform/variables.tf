@@ -218,6 +218,34 @@ variable "user_volume_id" {
   default     = ""
 }
 
+variable "enable_access" {
+  description = <<-EOT
+    Put Cloudflare Access in front of this desktop, so only the Google account
+    that started it can reach the hostname at all - checked at Cloudflare's
+    edge, before the request touches AWS.
+
+    This is the fix for the project's oldest known hole: a desktop is
+    internet-facing on 443 with Caddy basic auth as the only barrier, and the
+    container has passwordless sudo. It also removes the per-session password
+    from the user's path entirely, since they are already authenticated.
+
+    Defaults to FALSE deliberately. Access requires the hostname to be PROXIED
+    through Cloudflare, and Selkies streams over a long-lived WebSocket that
+    has never been exercised through that proxy. Turning this on is therefore
+    a behaviour change to a working desktop, and must be tested rather than
+    assumed - if the stream breaks, set this back to false and the desktop
+    returns to DNS-only immediately.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "cloudflare_account_id" {
+  description = "Account that owns the Zero Trust organisation. Only used when enable_access is true."
+  type        = string
+  default     = "6128d1607a4bc882e8ccb1352a14702c"
+}
+
 variable "cloudflare_dns_api_token" {
   description = <<-EOT
     Lets Caddy prove domain ownership via a DNS-01 TXT record instead of the

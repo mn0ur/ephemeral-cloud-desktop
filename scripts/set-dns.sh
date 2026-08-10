@@ -25,9 +25,19 @@
 # call that omits it.
 set -euo pipefail
 
-FQDN="${1:?usage: set-dns.sh <fqdn> <ip> [zone]}"
-IP="${2:?usage: set-dns.sh <fqdn> <ip> [zone]}"
+FQDN="${1:?usage: set-dns.sh <fqdn> <ip> [zone] [proxied]}"
+IP="${2:?usage: set-dns.sh <fqdn> <ip> [zone] [proxied]}"
 ZONE="${3:-${FQDN#*.}}"
+
+# proxied=true routes the hostname through Cloudflare, which is REQUIRED for
+# Cloudflare Access to apply to it - Access cannot gate a DNS-only record.
+# Defaults to false, which is the long-standing behaviour: DNS-only, Caddy
+# terminating TLS directly, and no proxy in the streaming path.
+PROXIED="${4:-false}"
+case "$PROXIED" in
+  true|false) : ;;
+  *) echo "FATAL: proxied must be 'true' or 'false', got '$PROXIED'"; exit 1 ;;
+esac
 : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is not set}"
 
 api() { curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" "$@"; }
@@ -39,7 +49,7 @@ ZID=$(api "https://api.cloudflare.com/client/v4/zones?name=$ZONE" \
 RID=$(api "https://api.cloudflare.com/client/v4/zones/$ZID/dns_records?name=$FQDN&type=A" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("result") or []; print(r[0]["id"] if r else "")')
 
-BODY=$(python3 -c 'import json,sys; print(json.dumps({"type":"A","name":sys.argv[1],"content":sys.argv[2],"ttl":60,"proxied":False,"comment":"ephemeral desktop - updated in place, never deleted"}))' "$FQDN" "$IP")
+BODY=$(python3 -c 'import json,sys; print(json.dumps({"type":"A","name":sys.argv[1],"content":sys.argv[2],"ttl":60,"proxied":sys.argv[3]=="true","comment":"ephemeral desktop - updated in place, never deleted"}))' "$FQDN" "$IP" "$PROXIED")
 
 if [ -n "$RID" ]; then
   OK=$(api -X PATCH -d "$BODY" "https://api.cloudflare.com/client/v4/zones/$ZID/dns_records/$RID" \

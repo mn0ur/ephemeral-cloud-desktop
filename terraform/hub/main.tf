@@ -63,14 +63,18 @@ variable "instance_type" {
     RunInstances failed with InsufficientInstanceCapacity after 25 retries
     over ~2 hours, taking the hub offline for that whole window.
 
-    Defaulting to t4g.small now - not for the extra RAM, but because it
-    happened to have capacity when t4g.micro did not. If this ever recurs,
-    try a different size in the same family before changing AZ; the AZ is
-    fixed by aws_ebs_volume.data, which cannot move without a snapshot
-    restore.
+    t4g.small was used temporarily because it happened to have capacity when
+    t4g.micro did not - not because the extra RAM was needed. Capacity
+    returned (verified with a dry-run RunInstances on 2026-08-10), so this is
+    back to t4g.micro at roughly half the cost: ~$6.13/mo vs ~$12.26/mo.
+
+    If InsufficientInstanceCapacity happens again, try another size in the
+    same family before changing AZ - the AZ is fixed by aws_ebs_volume.data,
+    which cannot move without a snapshot restore. And measure with a dry-run
+    RunInstances rather than assuming a past failure still applies.
   EOT
   type        = string
-  default     = "t4g.small"
+  default     = "t4g.micro"
 }
 
 variable "hostname" {

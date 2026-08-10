@@ -339,6 +339,11 @@ resource "aws_instance" "desktop" {
     fresh                    = var.fresh ? "true" : "false"
     cloudflare_dns_api_token = var.cloudflare_dns_api_token
     access_enabled           = local.access_enabled ? "true" : "false"
+    # A volume is attached for the owner's own desktop always, and for a guest
+    # only when they asked to keep their data. The boot script needs to know
+    # which, because "no volume found" is a fatal error in one case and the
+    # entire point in the other.
+    persist_enabled = (var.username == "" || var.user_volume_id != "") ? "true" : "false"
   }))
 
   root_block_device {

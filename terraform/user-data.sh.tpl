@@ -26,6 +26,11 @@ FRESH="${fresh}"
 # When true, Cloudflare Access gates this hostname and the security group only
 # accepts Cloudflare's edge - so the desktop runs without its own password.
 ACCESS_ENABLED="${access_enabled}"
+# true  -> a volume is attached and MUST be found, or we abort rather than
+#          silently write the user's data to a disk that dies on destroy.
+# false -> no volume by design ("don't keep my data"); the root disk is the
+#          correct place to run and everything is meant to vanish.
+PERSIST_ENABLED="${persist_enabled}"
 PERSIST_ROOT="/mnt/persist"
 CONFIG_DIR="$PERSIST_ROOT/config"
 DOCKER_ROOT="$PERSIST_ROOT/docker"
@@ -131,11 +136,30 @@ for _ in $(seq 1 30); do
 done
 
 if [ -z "$DEV" ]; then
-  echo "FATAL: persistent volume never appeared. Refusing to continue -"
-  echo "starting on ephemeral storage would silently discard everything."
-  exit 1
+  # No volume found. Whether that is a disaster or the whole point depends
+  # entirely on whether one was SUPPOSED to be here.
+  #
+  # PERSIST_ENABLED=false means the user chose not to keep their data, so
+  # there is no volume by design and the root disk is the correct place to
+  # run - everything is meant to vanish on destroy. Treating that as fatal
+  # is what made "don't keep my data" impossible to use at all: the desktop
+  # aborted before starting the container, /healthz never answered, and the
+  # control panel sat on "Booting..." until it timed out.
+  if [ "$PERSIST_ENABLED" = "true" ]; then
+    echo "FATAL: a persistent volume was expected but never appeared."
+    echo "Refusing to continue - starting on ephemeral storage would"
+    echo "silently discard data the user asked to keep."
+    exit 1
+  fi
+  echo "no volume attached and none expected - this is an EPHEMERAL desktop."
+  echo "Everything under $PERSIST_ROOT lives on the root disk and dies with the instance."
+  EPHEMERAL_ONLY=true
+else
+  EPHEMERAL_ONLY=false
+  echo "persistent volume: $DEV"
 fi
-echo "persistent volume: $DEV"
+
+if [ "$EPHEMERAL_ONLY" != "true" ]; then
 
 if ! blkid "$DEV" >/dev/null 2>&1; then
   echo "no filesystem - formatting (first ever boot for this volume)"
@@ -209,6 +233,9 @@ if [ "$DEV_BLOCKS" -gt $(( FS_BLOCKS + 262144 )) ]; then
 else
   echo "filesystem already fills the volume - no resize needed"
 fi
+
+fi  # end of volume-backed setup
+
 
 # Migrate the earlier layout, where /config sat at the volume root, into the
 # new config/ subdirectory. Idempotent: only runs when the old shape is found.

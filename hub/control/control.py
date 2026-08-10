@@ -775,6 +775,10 @@ DESKTOP_PAGE = """<!doctype html>
  label{display:block;font-size:.78rem;color:var(--dim);margin:.6rem 0}
  input[type=checkbox]{accent-color:var(--green)}
  .cred{font-size:.76rem;color:var(--amber);margin-top:.5rem;word-break:break-all}
+ .creds{margin-top:.7rem;padding:.6rem .7rem;background:var(--bg2);border:1px solid var(--border);border-radius:8px}
+ .creds>div{display:flex;gap:.6rem;align-items:baseline;font-size:.78rem;padding:.1rem 0}
+ .ck{color:var(--dim);min-width:74px}
+ .cv{color:var(--amber);word-break:break-all;user-select:all}
  .steps{margin-top:.8rem;border-top:1px solid var(--border);padding-top:.6rem}
  .step{display:flex;gap:.6rem;align-items:baseline;font-size:.76rem;padding:.12rem 0;color:var(--dim)}
  .step span:last-child{color:var(--text)}
@@ -880,13 +884,21 @@ function renderMine(s){
   }
   const label = mine.status==='active' ? 'Running' : 'Booting…';
   let html = `<div><span class="dot ${mine.status==='active'?'up':'work'}"></span> ${label}</div>`;
-  if(mine.password){
-    html += `<div class="cred">password: ${esc(mine.password)}</div>`;
-  } else if(mine.discovered){
-    // Discovered by probing rather than reported by the callback, so the
-    // password never reached us. Say so instead of showing a blank field.
-    html += `<div class="sub">Password not recorded (this desktop was recovered, not started normally).</div>`;
-  }
+
+  // Show the USERNAME next to the password. The desktop asks for both, and
+  // the username is not obvious - it is derived from the Google account's
+  // email local part, not typed by anyone - so a user with only the password
+  // has to guess. Both are shown together, and the username is stable across
+  // every session while the password is regenerated each start.
+  html += `<div class="creds">
+      <div><span class="ck">username</span><span class="cv">${esc(session.user_id)}</span></div>
+      ${mine.password
+        ? `<div><span class="ck">password</span><span class="cv">${esc(mine.password)}</span></div>`
+        : (mine.discovered
+            ? `<div class="sub">Password not recorded — this desktop was recovered rather than started normally.</div>`
+            : '')}
+      <div class="sub" style="margin-top:.35rem">Same username every time. The password changes each start.</div>
+    </div>`;
   if(mine.url) html += `<a class="open" href="${esc(mine.url)}" target="_blank">Open desktop &rarr;</a>`;
   html += `<div class="row"><button id="destroy" class="stop">Destroy</button></div>`;
   if(mine.status!=='active') html += stepsHtml(s.progress);

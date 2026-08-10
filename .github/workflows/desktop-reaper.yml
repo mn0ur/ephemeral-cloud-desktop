@@ -8,10 +8,37 @@ name: Desktop - REAPER
 # There is no fixed list of usernames to loop over - discovery is by AWS
 # tag (Role=guest-desktop), not a hardcoded set. The owner's own desktop
 # carries no such tag and is never touched by this workflow.
+#
+# ---------------------------------------------------------------------------
+# THE SCHEDULE IS DELIBERATELY DISABLED. Do not re-enable it without first
+# verifying the activity tracker on a real desktop.
+#
+# This reaper trusts /last-activity, a file kept current by an
+# activity-tracker service tailing Caddy's access log. That service has
+# never been verified against real traffic, and its two failure modes are
+# NOT equally safe:
+#
+#   pattern doesn't match  -> monitoring counts as activity -> never
+#                             destroys anything. Harmless.
+#   tracker service dead   -> the file is written ONCE at boot, so it keeps
+#                             returning a valid-looking number forever ->
+#                             this workflow destroys a desktop someone is
+#                             actively working in, 4h after it booted.
+#
+# The second one loses a user's session mid-use. Running an unverified
+# auto-destroyer on a 15-minute cron is not worth that.
+#
+# Consequence, accepted knowingly: nothing stops a forgotten desktop
+# billing at $0.104/hr. Visible in the control panel (running time and
+# session cost) and manually destroyable, which is adequate for a single
+# operator - and NOT adequate once real guests use this.
+#
+# When that gap needs closing, prefer a MAX-SESSION-AGE reaper over this
+# one: LaunchTime comes from the EC2 API, so it depends on nothing running
+# inside the instance and has no unverifiable moving parts.
+# ---------------------------------------------------------------------------
 on:
-  schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {} # manual run, for testing this workflow itself
+  workflow_dispatch: {} # manual only - see above before adding a schedule
 
 permissions:
   contents: read

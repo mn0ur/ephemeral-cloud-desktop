@@ -32,10 +32,12 @@ locals {
 
   effective_hostname = var.username == "" ? var.hostname : "${var.username}.desktop.${var.cloudflare_zone}"
 
-  # Must match terraform/persistent, which derives its AZ identically. An EBS
-  # volume can only attach to an instance in the same availability zone, so
-  # these two stacks have to agree without manual coordination.
-  az = "${var.region}a"
+  # An EBS volume can only attach to an instance in its own availability zone,
+  # so this must agree with wherever guest volumes are created - see the
+  # AWS_AZ env in desktop-up.yml, which is the single source of truth.
+  # The suffix is a variable rather than a hardcoded "a" because spot pricing
+  # differs by ~23% between zones in ap-south-1, and "a" is the priciest.
+  az = "${var.region}${var.az_suffix}"
 
   # Explicit password when supplied, generated otherwise. Lets a desktop be
   # handed to someone else with credentials you choose, without weakening the

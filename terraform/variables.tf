@@ -2,21 +2,47 @@ variable "region" {
   description = <<-EOT
     AWS region the desktop runs in.
 
-    PREFERRED: me-central-1 (UAE) - roughly 5-15ms from Abu Dhabi against
-    110-130ms to Frankfurt, and measured spot pricing is ~16% cheaper.
+    ap-south-1 (Mumbai) as of 2026-08-10, moved from eu-central-1 (Frankfurt)
+    on measured numbers rather than assumption:
 
-    TEMPORARILY eu-central-1: on 2026-08-08 me-central-1 returned
-    RequestLimitExceeded on ec2:RunInstances for every instance type tested
-    ("throttled due to an operational issue"), while the identical call
-    succeeded in eu-central-1. An AWS-side outage, not a configuration fault.
+      Frankfurt   $0.1004/hr spot   142ms latency (measured in-session)
+      Mumbai      $0.0529/hr spot   ~40-55ms estimated
+      UAE         $0.0878/hr spot   ~10-15ms estimated
 
-    Switch back to me-central-1 once that clears. Note this destroys and
-    recreates everything - VPCs, subnets and security groups are regional.
-    The S3 state backend stays in me-central-1 regardless; backend region and
+    Mumbai is 47% cheaper than Frankfurt AND roughly 3x closer. UAE would be
+    closer still but costs 66% more than Mumbai; at low usage the difference
+    between them is under a dollar a month, so either is defensible - this is
+    the cheap-and-much-better option rather than the best-and-still-cheaper one.
+
+    Changing this recreates everything regional: VPC, subnet, security group,
+    key pair. It does NOT move EBS volumes - those are locked to an
+    availability zone, so a region change means starting from an empty volume.
+    The S3 state backend stays in me-central-1 either way; backend region and
     resource region are independent.
   EOT
   type        = string
-  default     = "eu-central-1"
+  default     = "ap-south-1"
+}
+
+variable "az_suffix" {
+  description = <<-EOT
+    Which availability zone within the region, as a bare suffix ("a", "b", "c").
+
+    NOT hardcoded to "a", because spot pricing varies materially between zones
+    and "a" is not reliably the cheapest. Measured in ap-south-1 on 2026-08-10:
+
+      ap-south-1c   $0.0529/hr    <- cheapest
+      ap-south-1b   $0.0612/hr
+      ap-south-1a   $0.0651/hr    <- 23% more than 1c
+
+    Defaulting to "a" would have quietly picked the most expensive zone in the
+    region we moved to specifically to save money.
+
+    An EBS volume can only attach to an instance in its own zone, so this must
+    match wherever guest volumes are created (see desktop-up.yml).
+  EOT
+  type        = string
+  default     = "c"
 }
 
 variable "project" {

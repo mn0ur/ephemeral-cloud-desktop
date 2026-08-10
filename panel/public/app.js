@@ -81,7 +81,7 @@ function renderMine(s) {
   let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}`;
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
-    html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * (s.hourly_usd || 0.104)).toFixed(2)} this session</span>`;
+    html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * (s.hourly_usd || 0.0529)).toFixed(2)} this session</span>`;
   }
   html += "</div>";
 

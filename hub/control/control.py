@@ -78,9 +78,13 @@ MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
 # request per registered user, so this must NOT run on every status poll.
 DISCOVERY_INTERVAL_S = int(os.environ.get("DISCOVERY_INTERVAL_S", "60"))
 
-# Measured spot price for c7i.xlarge in eu-central-1. Used only to show a
-# running estimate - the authoritative number is always the AWS bill.
-HOURLY_USD = float(os.environ.get("HOURLY_USD", "0.104"))
+# Measured spot price for c7i.xlarge in ap-south-1c on 2026-08-10. Used only
+# to show a running estimate - the authoritative number is always the AWS bill.
+#
+# This MUST be updated whenever var.region or var.az_suffix changes, or the
+# panel quietly overstates every session: eu-central-1 was $0.104/hr, so
+# leaving the old value behind would have doubled every figure a guest sees.
+HOURLY_USD = float(os.environ.get("HOURLY_USD", "0.0529"))
 
 # Guest sign-in. Empty GOOGLE_CLIENT_ID is a valid, safe state - see below.
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")

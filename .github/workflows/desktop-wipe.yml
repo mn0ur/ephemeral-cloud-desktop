@@ -32,6 +32,15 @@ jobs:
   wipe:
     name: delete saved data
     runs-on: ubuntu-latest
+
+    # Region and zone in ONE place. They used to be repeated inline in every
+    # aws call and every AWS_DEFAULT_REGION export, which is how a region move
+    # turns into a hunt. ap-south-1c specifically: spot there is $0.0529/hr
+    # against $0.0651 in ap-south-1a - the zone a hardcoded "a" would have
+    # picked - and 47% under eu-central-1.
+    env:
+      AWS_REGION: ap-south-1
+      AWS_AZ: ap-south-1c
     steps:
       - name: Check confirmation
         run: |
@@ -55,7 +64,7 @@ jobs:
           fi
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
-          echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
       - name: Delete the volume
         env:

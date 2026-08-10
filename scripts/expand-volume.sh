@@ -15,7 +15,7 @@ set -euo pipefail
 
 USERNAME="${1:?usage: expand-volume.sh <username> <new-size-gb>}"
 NEW_SIZE="${2:?usage: expand-volume.sh <username> <new-size-gb>}"
-REGION="${AWS_DEFAULT_REGION:-eu-central-1}"
+REGION="${AWS_DEFAULT_REGION:-ap-south-1}"
 
 case "$NEW_SIZE" in
   ''|*[!0-9]*) echo "FATAL: size must be a whole number of GB, got '$NEW_SIZE'"; exit 1 ;;

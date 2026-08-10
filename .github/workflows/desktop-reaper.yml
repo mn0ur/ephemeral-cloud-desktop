@@ -50,6 +50,15 @@ jobs:
   reap:
     name: destroy anything idle past the limit
     runs-on: ubuntu-latest
+
+    # Region and zone in ONE place. They used to be repeated inline in every
+    # aws call and every AWS_DEFAULT_REGION export, which is how a region move
+    # turns into a hunt. ap-south-1c specifically: spot there is $0.0529/hr
+    # against $0.0651 in ap-south-1a - the zone a hardcoded "a" would have
+    # picked - and 47% under eu-central-1.
+    env:
+      AWS_REGION: ap-south-1
+      AWS_AZ: ap-south-1c
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +77,7 @@ jobs:
           fi
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
-          echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
       - name: Discover every live guest desktop, destroy anything idle
         env:
@@ -78,7 +87,7 @@ jobs:
           set -uo pipefail
           NOW=$(date -u +%s)
 
-          USERNAMES=$(aws ec2 describe-instances --region eu-central-1 \
+          USERNAMES=$(aws ec2 describe-instances --region "$AWS_REGION" \
             --filters "Name=tag:Role,Values=guest-desktop" "Name=instance-state-name,Values=running,pending" \
             --query 'Reservations[].Instances[].Tags[?Key==`Owner`].Value | [0]' \
             --output text)

@@ -2,7 +2,10 @@
 
 export const DESKTOP_DOMAIN = process.env.DESKTOP_DOMAIN || "desktop.mnour.dev";
 export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
-export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.104);
+// c7i.xlarge spot in ap-south-1c, measured 2026-08-10. Keep in step with
+// terraform/variables.tf: a region move that forgets this line makes the
+// panel lie about money. eu-central-1 was 0.104.
+export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0529);
 export const PENDING_TIMEOUT_S = 10 * 60;
 
 export function desktopUrl(username) {

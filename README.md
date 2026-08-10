@@ -134,8 +134,8 @@ container, not from the docs.
 
 | State | Measured |
 |---|---|
-| Running (`c7i.xlarge` spot, eu-central-1) | **$0.104/hr** |
-| 2 hr/day × 20 days | ~$4.16/month |
+| Running (`c7i.xlarge` spot, ap-south-1c) | **$0.0529/hr** |
+| 2 hr/day × 20 days | ~$2.12/month |
 | Destroyed | **~$1.90/month** — the 20GB volume, nothing else |
 
 That $1.90 is the price of "destroy the machine, keep the work". It is a
@@ -157,13 +157,18 @@ Stated plainly rather than omitted.
   and ready at `docs/aws-permissions-policy.json`, awaiting an account admin.
 - **No SSM.** Same missing permission. Debugging uses SSH on port 22 behind a
   feature flag (`enable_ssh`), off by default.
-- **Region is `eu-central-1`, not `me-central-1`.** Abu Dhabi is ~5–15ms from
-  the UAE region against ~110–130ms to Frankfurt, and spot is ~16% cheaper
-  there. On 2026-08-08 `me-central-1` returned `RequestLimitExceeded` on
-  `RunInstances` for every instance type tested while the identical call
-  succeeded in Frankfurt. Moving back is a variable change.
+- **Region is `ap-south-1` (Mumbai), not `me-central-1` (UAE).** UAE is the
+  closest region to Abu Dhabi (~10–15ms) but on 2026-08-08 it returned
+  `RequestLimitExceeded` on `RunInstances` for every instance type tested,
+  while the identical call succeeded elsewhere. Mumbai is the compromise:
+  ~40–55ms, and spot at $0.0529/hr against UAE's $0.0878 and Frankfurt's
+  $0.1004. Moving is a `var.region` + `var.az_suffix` change, plus the
+  `HOURLY_USD` constant in two places.
+- **The zone is pinned to `c`, not `a`.** Spot varies ~23% between zones in
+  ap-south-1 and `a` is the most expensive of the three. `var.az_suffix`
+  exists so that is a decision rather than an accident.
 - **No automatic teardown.** Nothing destroys an idle desktop. A forgotten
-  session bills $0.104/hr indefinitely.
+  session bills $0.0529/hr indefinitely.
 - **Package installs are not declarative.** They persist on the volume, which
   is what was wanted, but they are not recorded anywhere reviewable. Capturing
   them into a file and raising a pull request remains the intended answer.

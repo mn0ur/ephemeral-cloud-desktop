@@ -36,6 +36,8 @@ jobs:
     # cache and same key as desktop-up.yml, so a start warms the cache that
     # the following destroy then hits.
     env:
+      AWS_REGION: ap-south-1
+      AWS_AZ: ap-south-1c
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
 
     steps:
@@ -74,7 +76,7 @@ jobs:
           fi
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
-          echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
       # Only the desktop stack. The persistent volume lives in
       # terraform/persistent and the monitoring box in terraform/hub - neither
@@ -112,7 +114,7 @@ jobs:
 
       - name: Confirm nothing billable is left
         run: |
-          RUNNING=$(aws ec2 describe-instances --region eu-central-1 \
+          RUNNING=$(aws ec2 describe-instances --region "$AWS_REGION" \
             --filters "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=running,pending" \
             --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo "?")
           {

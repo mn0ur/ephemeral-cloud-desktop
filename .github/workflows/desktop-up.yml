@@ -72,6 +72,8 @@ jobs:
     # download entirely, and the lockfile is exactly the right key: it changes
     # if and only if a provider version changes.
     env:
+      AWS_REGION: ap-south-1
+      AWS_AZ: ap-south-1c
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
 
     steps:
@@ -104,7 +106,7 @@ jobs:
           fi
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
-          echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
       - name: Guest-only setup (volume, password)
         if: inputs.guest_username != ''
@@ -122,7 +124,7 @@ jobs:
               --query 'Volumes[0].VolumeId' --output text)
             if [ "$VOL_ID" = "None" ] || [ -z "$VOL_ID" ]; then
               VOL_ID=$(aws ec2 create-volume \
-                --region eu-central-1 --availability-zone eu-central-1a \
+                --region "$AWS_REGION" --availability-zone "$AWS_AZ" \
                 --size 15 --volume-type gp3 --encrypted \
                 --tag-specifications "ResourceType=volume,Tags=[{Key=Owner,Value=$GUEST_USERNAME},{Key=Role,Value=desktop-guest-data},{Key=ManagedBy,Value=workflow}]" \
                 --query VolumeId --output text)

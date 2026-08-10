@@ -54,7 +54,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.environ.get("GH_REPO", "mn0ur/ephemeral-cloud-desktop")
 TOKEN_FILE = os.environ.get("GH_TOKEN_FILE", "/etc/hub/github-token")
-DESKTOP_URL = os.environ.get("DESKTOP_URL", "https://desk.mnour.sd")
+DESKTOP_URL = os.environ.get("DESKTOP_URL", "https://desk.mnour.dev")
+
+# Per-user desktops live at <username>.<DESKTOP_DOMAIN>. Deterministic by
+# design, which is what lets refresh_sessions() discover a live desktop the
+# session-ready callback never told us about.
+DESKTOP_DOMAIN = os.environ.get("DESKTOP_DOMAIN", "desktop.mnour.dev")
 LISTEN = ("127.0.0.1", 8000)
 
 # Where live guest session state persists across a hub restart. On the
@@ -218,9 +223,80 @@ def refresh_sessions(sessions):
         elif s.get("status") == "pending" and now - s.get("dispatched_at", now) > PENDING_TIMEOUT_S:
             sessions[username] = {"status": "error"}
             changed = True
+
+    # Reconcile against reality, rather than trusting that we were told.
+    #
+    # This panel used to learn a desktop existed ONLY from the session-ready
+    # callback. When `terraform apply` created the instance and then failed on
+    # a later step, the callback never fired - so the panel showed nothing at
+    # all while an instance was up and billing, with no URL and no Destroy
+    # button to stop it. That is the worst possible failure for a control
+    # panel: real cost, running, and invisible.
+    #
+    # Every registered user has a deterministic hostname, so liveness can be
+    # discovered by probing it. No AWS credentials needed, which keeps this
+    # box free of them by design.
+    for username in (_load_users().get("by_sub") or {}).values():
+        if sessions.get(username, {}).get("status") in ("ready", "active", "pending"):
+            continue
+        url = f"https://{username}.{DESKTOP_DOMAIN}"
+        if url_up(url):
+            sessions[username] = {
+                "status": "active",
+                "email": (sessions.get(username) or {}).get("email"),
+                "url": url,
+                # No password: it is generated inside the workflow and only
+                # ever reaches us through the callback. Recording the desktop
+                # as discovered-but-credential-unknown is honest, and still
+                # gives the owner a working Destroy button, which is the part
+                # that stops the billing.
+                "password": None,
+                "discovered": True,
+                "started_at": (sessions.get(username) or {}).get("started_at") or now,
+            }
+            changed = True
+            log_event("discovered", username=username, url=url)
+
     if changed:
         _save_sessions(sessions)
     return sessions
+
+
+def run_progress():
+    """The live step-by-step state of the most recent START or DESTROY run.
+
+    The panel previously showed only a spinner and the coarse workflow status,
+    so a five-minute start looked identical to a hung one. These are the real
+    step names from the Actions API, so progress is followable in real time
+    and a failure names the step that failed instead of going quiet.
+    """
+    try:
+        runs = (gh("GET", f"/repos/{REPO}/actions/runs?per_page=5").get("workflow_runs") or [])
+        run = next((r for r in runs if "DESKTOP" in (r.get("name") or "").upper()), None)
+        if not run:
+            return None
+        jobs = gh("GET", f"/repos/{REPO}/actions/runs/{run['id']}/jobs").get("jobs") or []
+        steps = []
+        for j in jobs:
+            for s in j.get("steps") or []:
+                name = s.get("name") or ""
+                # "Set up job", "Post Run actions/checkout" etc. are runner
+                # bookkeeping - noise to anyone watching their desktop start.
+                if name.startswith(("Set up job", "Post ", "Complete job", "Run actions/", "Run hashicorp/")):
+                    continue
+                steps.append({
+                    "name": name,
+                    "state": s.get("conclusion") or s.get("status"),
+                })
+        return {
+            "name": run.get("name"),
+            "status": run.get("status"),
+            "conclusion": run.get("conclusion"),
+            "url": run.get("html_url"),
+            "steps": steps,
+        }
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +688,13 @@ DESKTOP_PAGE = """<!doctype html>
  label{display:block;font-size:.78rem;color:var(--dim);margin:.6rem 0}
  input[type=checkbox]{accent-color:var(--green)}
  .cred{font-size:.76rem;color:var(--amber);margin-top:.5rem;word-break:break-all}
+ .steps{margin-top:.8rem;border-top:1px solid var(--border);padding-top:.6rem}
+ .step{display:flex;gap:.6rem;align-items:baseline;font-size:.76rem;padding:.12rem 0;color:var(--dim)}
+ .step span:last-child{color:var(--text)}
+ .s-ok{color:var(--green-dim);min-width:62px}
+ .s-bad{color:var(--red);min-width:62px}
+ .s-run{color:var(--amber);min-width:62px;animation:p 1s infinite}
+ .s-skip,.s-wait{color:var(--mute);min-width:62px}
  .who{font-size:.76rem;color:var(--mute);margin-top:.3rem}
  .err{color:#ff9a94;font-size:.78rem;margin-top:.7rem;white-space:pre-wrap}
  table{width:100%;border-collapse:collapse;font-size:.76rem;margin-top:.5rem}
@@ -659,6 +742,25 @@ function fmtDur(s){
 }
 function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
+// Real workflow steps, so a start that takes five minutes is followable
+// rather than a spinner that looks identical to a hang. A failed step is
+// named here instead of the UI simply going quiet.
+function stepsHtml(p){
+  if(!p || !p.steps || !p.steps.length) return '';
+  const icon = st =>
+    st==='success' ? '<span class="s-ok">done</span>' :
+    st==='failure' ? '<span class="s-bad">failed</span>' :
+    st==='in_progress' ? '<span class="s-run">running</span>' :
+    st==='skipped' ? '<span class="s-skip">skipped</span>' :
+    '<span class="s-wait">waiting</span>';
+  const rows = p.steps.map(st =>
+    `<div class="step">${icon(st.state)}<span>${esc(st.name)}</span></div>`).join('');
+  const link = p.url ? `<a class="sub" href="${esc(p.url)}" target="_blank">full log &rarr;</a>` : '';
+  const failed = p.conclusion==='failure'
+    ? `<div class="s-bad" style="margin-top:.4rem">This run failed — see the step marked failed.</div>` : '';
+  return `<div class="steps"><div class="sub">${esc(p.name||'')} · ${esc(p.status||'')}</div>${rows}${failed}${link}</div>`;
+}
+
 function renderMine(s){
   const box=$('mine');
   if(!session){ box.innerHTML=''; return; }
@@ -671,14 +773,21 @@ function renderMine(s){
     return;
   }
   if(mine.status==='pending'){
-    box.innerHTML = `<div><span class="dot work"></span> Starting…</div>`;
+    box.innerHTML = `<div><span class="dot work"></span> Starting…</div>` + stepsHtml(s.progress);
     return;
   }
   const label = mine.status==='active' ? 'Running' : 'Booting…';
   let html = `<div><span class="dot ${mine.status==='active'?'up':'work'}"></span> ${label}</div>`;
-  if(mine.password) html += `<div class="cred">password: ${esc(mine.password)}</div>`;
+  if(mine.password){
+    html += `<div class="cred">password: ${esc(mine.password)}</div>`;
+  } else if(mine.discovered){
+    // Discovered by probing rather than reported by the callback, so the
+    // password never reached us. Say so instead of showing a blank field.
+    html += `<div class="sub">Password not recorded (this desktop was recovered, not started normally).</div>`;
+  }
   if(mine.url) html += `<a class="open" href="${esc(mine.url)}" target="_blank">Open desktop &rarr;</a>`;
   html += `<div class="row"><button id="destroy" class="stop">Destroy</button></div>`;
+  if(mine.status!=='active') html += stepsHtml(s.progress);
   box.innerHTML = html;
   $('destroy').onclick=()=>go('destroy');
 }
@@ -688,8 +797,12 @@ function renderAdmin(s){
   $('admin-card').style.display='block';
   $('history-card').style.display='block';
 
-  const entries=Object.entries(s.sessions||{});
-  $('admin-sessions').innerHTML = entries.length ? '' : '<div class="sub">Nobody running right now.</div>';
+  // The admin's OWN session is deliberately excluded here - it already has a
+  // full card above with its own Destroy button, and listing it again
+  // produced two identical Destroy buttons on one page with no way to tell
+  // which did what.
+  const entries=Object.entries(s.sessions||{}).filter(([u])=>u!==session.user_id);
+  $('admin-sessions').innerHTML = entries.length ? '' : '<div class="sub">Nobody else running right now.</div>';
   for(const [uname,sess] of entries){
     const row=document.createElement('div'); row.className='sess-row';
     row.innerHTML = `<div><strong>${esc(uname)}</strong><div class="who">${esc(sess.email||'')} · ${esc(sess.status)}</div></div>`;
@@ -729,8 +842,15 @@ async function poll(){
     $('g-signed').style.display = session ? 'flex' : 'none';
     if(session) $('g-email').textContent = session.email;
 
-    if(busy && session && s.my_session && s.my_session.status==='active'){
-      busy=false; location.href=s.my_session.url;
+    // Auto-open only on a START we initiated. Without the pending_action
+    // check, a destroy that briefly still saw an 'active' session would
+    // redirect the user INTO the desktop they just asked to tear down.
+    if(busy && pending_action==='start' && session && s.my_session && s.my_session.status==='active'){
+      busy=false; pending_action=null; location.href=s.my_session.url;
+    }
+    // A destroy is finished when the session is genuinely gone.
+    if(busy && pending_action==='destroy' && !s.my_session){
+      busy=false; pending_action=null;
     }
     renderMine(s);
     renderAdmin(s);
@@ -751,11 +871,27 @@ async function go(action){
   const body={action, guest:true};
   if(action==='start') body.persist = $('persist')?.checked||false;
   if(action==='destroy' && !confirm('Destroy your desktop? Your data survives only if you kept it.')) return;
-  busy = action==='start';
+  // Both actions set busy. This used to be `busy = action==='start'`, so a
+  // destroy dispatched correctly and changed NOTHING on screen - no spinner,
+  // no message - until a poll minutes later noticed the desktop was gone. It
+  // worked and looked broken, which had me hunting a non-existent bug while
+  // three real DESTROY runs completed in the background.
+  busy = true;
+  pending_action = action;
+  render_busy(action);
   try{
     const r=await fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok){ busy=false; $('err').textContent=await r.text(); }
-  }catch(e){ busy=false; $('err').textContent=e.message; }
+    if(!r.ok){ busy=false; pending_action=null; $('err').textContent=await r.text(); }
+  }catch(e){ busy=false; pending_action=null; $('err').textContent=e.message; }
+}
+
+let pending_action=null;
+
+function render_busy(action){
+  const box=$('mine');
+  if(!box) return;
+  box.innerHTML = `<div><span class="dot work"></span> ${action==='destroy'?'Destroying…':'Starting…'}</div>
+    <div class="sub">Dispatching the workflow…</div>`;
 }
 async function adminDestroy(username){
   if(!confirm(`Destroy ${username}'s desktop?`)) return;
@@ -834,6 +970,7 @@ class Handler(BaseHTTPRequestHandler):
                 "session": session,
                 "my_session": sessions.get(session["user_id"]) if session else None,
                 "sessions": visible,
+                "progress": run_progress() if session else None,
                 "active_count": active_count(sessions),
                 "max_concurrent": MAX_CONCURRENT if (session and session.get("is_admin")) else None,
             }
@@ -928,15 +1065,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, json.dumps({"error": "bad username"}))
         sessions = _load_sessions()
         prior = sessions.get(username, {})
+        # Prefer the email recorded at dispatch (set from a verified session,
+        # so it cannot be spoofed by the callback). Fall back to the callback's
+        # own value only when there is no prior state at all - which happens if
+        # the hub restarted mid-run, or if the desktop was recovered by hand
+        # after a partially-failed apply. Losing the owner's identity in that
+        # case is what leaves a desktop nobody can destroy from the panel.
+        email = prior.get("email") or req.get("owner_email")
         sessions[username] = {
             "status": "ready",  # control panel still polls healthz before "active"
-            "email": prior.get("email"),
+            "email": email,
             "url": req.get("url"),
             "password": req.get("password"),
             "started_at": time.time(),
         }
         _save_sessions(sessions)
-        log_event("start", username=username, email=prior.get("email"), url=req.get("url"))
+        log_event("start", username=username, email=email, url=req.get("url"))
         return self._send(200, json.dumps({"ok": True}))
 
     def _session_ended(self, req):

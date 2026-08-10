@@ -404,19 +404,23 @@ resource "null_resource" "dns" {
     fqdn = local.effective_hostname
     ip   = aws_instance.desktop.public_ip
     # Destroy-time provisioners may only reference self.triggers, so the
-    # script path and parked address have to live here too.
+    # script path, parked address and zone all have to live here too.
     script = "${path.module}/../scripts/set-dns.sh"
     parked = "192.0.2.1"
+    # Passed explicitly rather than derived inside the script. Deriving it by
+    # stripping one label worked for desk.mnour.sd and broke silently for
+    # mnuowr.desktop.mnour.dev, which has an extra label - see set-dns.sh.
+    zone = var.cloudflare_zone
   }
 
   provisioner "local-exec" {
-    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.ip}'"
+    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.ip}' '${self.triggers.zone}'"
     interpreter = ["bash", "-c"]
   }
 
   provisioner "local-exec" {
     when        = destroy
-    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.parked}'"
+    command     = "bash '${self.triggers.script}' '${self.triggers.fqdn}' '${self.triggers.parked}' '${self.triggers.zone}'"
     interpreter = ["bash", "-c"]
     # Never let a DNS hiccup block a teardown - the instance must still go.
     on_failure = continue

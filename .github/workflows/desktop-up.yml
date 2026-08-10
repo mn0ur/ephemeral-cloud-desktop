@@ -151,11 +151,18 @@ jobs:
             echo "::error::HUB_CALLBACK_SECRET is not set - the guest has no way to learn their URL or password. Add it under Settings > Secrets and variables > Actions."
             exit 1
           fi
+          # owner_email is a FALLBACK only. The hub prefers the email it
+          # recorded at dispatch time from a verified Google session, so this
+          # value cannot be used to reassign a desktop to someone else. It
+          # matters when the hub has no prior state - a hub restart mid-run, or
+          # a desktop recovered after a partially-failed apply - where losing
+          # the owner leaves a desktop nobody can destroy from the panel.
           PAYLOAD=$(jq -n \
             --arg username "${{ inputs.guest_username }}" \
             --arg url "$URL" \
             --arg password "$PASSWORD" \
-            '{username:$username, url:$url, password:$password}')
+            --arg owner_email "${{ inputs.owner_email }}" \
+            '{username:$username, url:$url, password:$password, owner_email:$owner_email}')
           curl -fsS -X POST "https://desktop.mnour.dev/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \

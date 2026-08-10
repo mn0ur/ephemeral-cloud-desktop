@@ -11,12 +11,23 @@
 # on a released AWS elastic IP would invite a subdomain takeover, where someone
 # else's content is served from this hostname under a certificate for it.
 #
-# Usage: set-dns.sh <fqdn> <ip>
+# Usage: set-dns.sh <fqdn> <ip> [zone]
+#
+# The zone is passed EXPLICITLY by the caller. It used to be derived as
+# "${FQDN#*.}" - strip one label - which is right for desk.mnour.sd (-> mnour.sd)
+# and silently wrong the moment a hostname gained a third label:
+# mnuowr.desktop.mnour.dev derived "desktop.mnour.dev", which is not a zone, and
+# the first real per-user desktop died with "FATAL: zone desktop.mnour.dev not
+# found" AFTER its EC2 instance was already running and billing.
+#
+# Terraform knows the zone (var.cloudflare_zone) so there is no reason to
+# re-derive it here. The fallback keeps the old behaviour for any direct manual
+# call that omits it.
 set -euo pipefail
 
-FQDN="${1:?usage: set-dns.sh <fqdn> <ip>}"
-IP="${2:?usage: set-dns.sh <fqdn> <ip>}"
-ZONE="${FQDN#*.}"
+FQDN="${1:?usage: set-dns.sh <fqdn> <ip> [zone]}"
+IP="${2:?usage: set-dns.sh <fqdn> <ip> [zone]}"
+ZONE="${3:-${FQDN#*.}}"
 : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is not set}"
 
 api() { curl -sS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" "$@"; }

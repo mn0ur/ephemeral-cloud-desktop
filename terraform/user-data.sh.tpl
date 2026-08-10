@@ -292,12 +292,18 @@ mount --bind "$CONTAINERD_ROOT" /var/lib/containerd
 
 # Assert, for the same reason as every other mount here: a bind that silently
 # fails leaves images on ephemeral storage and nothing looks wrong.
-if [ "$(stat -c %d /var/lib/containerd)" != "$(stat -c %d "$PERSIST_ROOT")" ]; then
+if [ "$EPHEMERAL_ONLY" = "true" ]; then
+  # Nothing to verify: there is no volume, so /var/lib/containerd being on the
+  # root disk is the intended outcome, not a failure. Asserting here would
+  # abort every ephemeral desktop.
+  echo "ephemeral desktop - containerd on the root disk by design, not asserting"
+elif [ "$(stat -c %d /var/lib/containerd)" != "$(stat -c %d "$PERSIST_ROOT")" ]; then
   echo "FATAL: /var/lib/containerd is not on the persistent volume."
   echo "Images and container layers would be lost on every destroy."
   exit 1
+else
+  echo "verified: /var/lib/containerd bound onto $PERSIST_ROOT"
 fi
-echo "verified: /var/lib/containerd bound onto $PERSIST_ROOT"
 
 systemctl enable containerd
 systemctl start containerd
@@ -312,7 +318,14 @@ for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
 DOCKER_ACTUAL="$(docker info --format '{{.DockerRootDir}}')"
 DOCKER_FS="$(df --output=target "$DOCKER_ACTUAL" 2>/dev/null | tail -1 | tr -d ' ')"
 echo "docker storage root: $DOCKER_ACTUAL (filesystem: $DOCKER_FS)"
-if [ "$DOCKER_FS" != "$PERSIST_ROOT" ]; then
+# Only meaningful when a volume exists. On an ephemeral desktop the docker root
+# resolving to '/' is precisely what was asked for - "container layers would be
+# ephemeral" is the entire point - so asserting it aborts a desktop that is
+# working exactly as intended. This is the SECOND assertion of this shape to
+# block ephemeral mode; the volume-mount check was the first.
+if [ "$EPHEMERAL_ONLY" = "true" ]; then
+  echo "ephemeral desktop - docker root on '$DOCKER_FS' by design, not asserting"
+elif [ "$DOCKER_FS" != "$PERSIST_ROOT" ]; then
   echo "FATAL: docker root $DOCKER_ACTUAL resolves to '$DOCKER_FS', not $PERSIST_ROOT."
   echo "Container layers would be ephemeral. Refusing to start the desktop."
   exit 1

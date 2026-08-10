@@ -180,6 +180,36 @@ if ! findmnt -n "$PERSIST_ROOT" >/dev/null 2>&1; then
 fi
 echo "verified: $PERSIST_ROOT is mounted on $(findmnt -no SOURCE "$PERSIST_ROOT")"
 
+# ---------------------------------------------------------------------------
+# Grow the filesystem to fill the volume, if the volume got bigger.
+#
+# EBS volumes can be enlarged online and in place, keeping every file - but
+# only the BLOCK DEVICE grows. The ext4 filesystem inside it does not notice,
+# so a volume expanded from 15GB to 30GB would still show 15GB inside the
+# desktop, and the extra space would be invisible and unusable. That looks
+# exactly like the expansion silently failing.
+#
+# resize2fs on a mounted ext4 filesystem is an online operation and a no-op
+# when there is nothing to grow, so this is safe to run on every boot. It
+# never shrinks: EBS cannot shrink, and neither can this.
+#
+# This is what makes "start small, expand later, keep your files" true rather
+# than aspirational: enlarge the volume with `aws ec2 modify-volume`, and the
+# next start picks the space up by itself.
+# ---------------------------------------------------------------------------
+FS_BLOCKS=$(df --output=size "$PERSIST_ROOT" 2>/dev/null | tail -1 | tr -d ' ')
+DEV_BYTES=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
+DEV_BLOCKS=$(( DEV_BYTES / 1024 ))
+# Only bother when the device is meaningfully larger than the filesystem
+# (>256MB), so normal metadata overhead does not trigger a pointless resize.
+if [ "$DEV_BLOCKS" -gt $(( FS_BLOCKS + 262144 )) ]; then
+  echo "volume is larger than its filesystem ($DEV_BLOCKS KB device vs $FS_BLOCKS KB fs) - growing"
+  resize2fs "$DEV" || echo "WARNING: resize2fs failed - the extra space stays unused, existing data is untouched"
+  df -h "$PERSIST_ROOT" | tail -1 | sed 's/^/  after resize: /'
+else
+  echo "filesystem already fills the volume - no resize needed"
+fi
+
 # Migrate the earlier layout, where /config sat at the volume root, into the
 # new config/ subdirectory. Idempotent: only runs when the old shape is found.
 if [ -d "$PERSIST_ROOT/.config" ] && [ ! -d "$CONFIG_DIR" ]; then

@@ -93,7 +93,16 @@ SESSION_MAX_AGE = 12 * 3600  # sign back in daily; nothing here needs longer
 WORKFLOWS = {
     "start": "desktop-up.yml",
     "destroy": "desktop-down.yml",
+    # Deletes a user's saved data volume. Separate from destroy on purpose:
+    # destroy ends a session and KEEPS the data; this throws the data away.
+    "wipe": "desktop-wipe.yml",
 }
+
+# Which users have a saved-data volume. The panel holds no AWS credentials, so
+# it cannot ask EC2 - it records the fact when a start with persist=true is
+# dispatched, and clears it when a wipe reports back. Kept on the hub's
+# persistent volume so it survives an instance replacement.
+DATA_FLAGS_FILE = os.environ.get("DATA_FLAGS_FILE", "/mnt/hubdata/control/data_flags.json")
 
 
 def token():
@@ -447,6 +456,31 @@ def _save_users(data):
     with open(tmp, "w") as fh:
         json.dump(data, fh)
     os.replace(tmp, USERS_FILE)
+
+
+def _load_data_flags():
+    try:
+        with open(DATA_FLAGS_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _set_has_data(username: str, value: bool):
+    flags = _load_data_flags()
+    if value:
+        flags[username] = True
+    else:
+        flags.pop(username, None)
+    os.makedirs(os.path.dirname(DATA_FLAGS_FILE), exist_ok=True)
+    tmp = DATA_FLAGS_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(flags, fh)
+    os.replace(tmp, DATA_FLAGS_FILE)
+
+
+def has_saved_data(username: str) -> bool:
+    return bool(_load_data_flags().get(username))
 
 
 def log_event(event: str, **fields):
@@ -879,10 +913,22 @@ function renderMine(s){
     return;
   }
   if(!mine || mine.status==='error'){
+    // Offer to delete saved data ONLY when there is some and nothing is
+    // running. Deliberately not a button next to Destroy: destroy ends a
+    // session and keeps your files, this throws the files away. Putting them
+    // side by side is how someone deletes their work by muscle memory.
+    const dataBlock = s.has_saved_data ? `
+      <div class="steps">
+        <div class="sub">You have saved files from a previous session. They will be
+        restored on your next start.</div>
+        <div class="row"><button id="wipe" class="stop">Delete my saved data</button></div>
+      </div>` : '';
     box.innerHTML = `
       <label><input type="checkbox" id="persist"> Keep my data after destroy</label>
-      <div class="row"><button id="start" class="go">Start my desktop</button></div>`;
+      <div class="row"><button id="start" class="go">Start my desktop</button></div>
+      ${dataBlock}`;
     $('start').onclick=()=>go('start');
+    if($('wipe')) $('wipe').onclick=()=>wipeData();
     return;
   }
   if(mine.status==='pending'){
@@ -1022,6 +1068,22 @@ async function go(action){
 
 let pending_action=null;
 
+async function wipeData(){
+  // Two-step confirmation, because this is irreversible and there is no
+  // snapshot behind it. A single confirm() is too easy to click through for
+  // something that permanently deletes someone's files.
+  if(!confirm('Permanently delete your saved files?\n\nThis cannot be undone. Your next desktop starts clean.')) return;
+  const typed = prompt('This is irreversible. Type DELETE to confirm:');
+  if(typed !== 'DELETE'){ $('err').textContent='Not deleted - confirmation did not match.'; return; }
+  $('err').textContent='';
+  try{
+    const r=await fetch('api/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'wipe', guest:true})});
+    if(!r.ok){ $('err').textContent=await r.text(); return; }
+    $('mine').innerHTML='<div><span class="dot work"></span> Deleting your saved data…</div>';
+  }catch(e){ $('err').textContent=e.message; }
+}
+
 function render_busy(action){
   const box=$('mine');
   if(!box) return;
@@ -1123,6 +1185,9 @@ class Handler(BaseHTTPRequestHandler):
                     if session and _worth_polling_progress(sessions, session)
                     else None
                 ),
+                # Lets the panel offer "delete my saved data" only to someone
+                # who actually has some - no button for nothing.
+                "has_saved_data": has_saved_data(session["user_id"]) if session else False,
                 "active_count": active_count(sessions),
                 "max_concurrent": MAX_CONCURRENT if (session and session.get("is_admin")) else None,
             }
@@ -1168,6 +1233,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._session_ready(req)
         if path == "/api/session-ended":
             return self._session_ended(req)
+        if path == "/api/data-wiped":
+            if not self._bearer_ok(HUB_CALLBACK_SECRET):
+                return self._send(403, json.dumps({"error": "bad callback secret"}))
+            username = req.get("username")
+            if not username:
+                return self._send(400, json.dumps({"error": "bad username"}))
+            _set_has_data(username, False)
+            log_event("data_wiped", username=username)
+            return self._send(200, json.dumps({"ok": True}))
         if path == "/api/dispatch":
             return self._dispatch(req)
 
@@ -1319,6 +1393,12 @@ class Handler(BaseHTTPRequestHandler):
                 "persist": "true" if req.get("persist") else "false",
             }
             resp = self._trigger(wf, inputs)
+            # Record that this user now has a volume, so the panel can offer to
+            # delete it later WITHOUT starting a desktop. Set only on a
+            # successful dispatch: claiming data exists when the start never
+            # ran would show a delete button for nothing.
+            if req.get("persist") and getattr(self, "_last_trigger_ok", False):
+                _set_has_data(my_username, True)
             # Roll back on ANY dispatch failure, not just the missing-token
             # case above - a GitHub outage, a revoked token or a rate limit
             # would otherwise leave the session wedged in "pending" exactly
@@ -1329,6 +1409,25 @@ class Handler(BaseHTTPRequestHandler):
                 _save_sessions(fresh)
                 log_event("start_failed", username=my_username, email=session["email"])
             return resp
+
+        if action == "wipe":
+            # Delete a user's saved data without starting a desktop. Only ever
+            # their own, unless the admin names someone else.
+            target = req.get("username") or my_username
+            if target != my_username and not session.get("is_admin"):
+                return self._send(403, json.dumps({"error": "not your data"}))
+            if not has_saved_data(target):
+                return self._send(404, json.dumps({"error": "no saved data to delete"}))
+            # The volume cannot be deleted while attached, and deleting it out
+            # from under a live desktop would corrupt whatever is mid-write.
+            # Refuse here with a clear reason rather than letting the workflow
+            # fail several minutes later.
+            if sessions.get(target, {}).get("status") in ("pending", "ready", "active"):
+                return self._send(409, json.dumps({
+                    "error": "that desktop is running - destroy it first, then delete the data"
+                }))
+            log_event("wipe_requested", username=target, by=my_username)
+            return self._trigger(wf, {"guest_username": target, "confirm": "DELETE"})
 
         if action == "destroy":
             # A non-admin naming someone else's username gets a clear 403,

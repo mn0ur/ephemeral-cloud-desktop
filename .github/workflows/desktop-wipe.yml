@@ -1,0 +1,124 @@
+name: Desktop - WIPE SAVED DATA
+
+# Permanently deletes ONE user's saved data volume, without touching any
+# desktop. Separate from DESTROY on purpose: destroy ends a session and keeps
+# the data, this throws the data away. They are different intentions and
+# should not share a button.
+#
+# IRREVERSIBLE. There is no snapshot and no undo - the volume is deleted.
+on:
+  workflow_dispatch:
+    inputs:
+      guest_username:
+        description: "Username whose saved data should be permanently deleted."
+        required: true
+        default: ""
+      confirm:
+        description: "Type DELETE to confirm. This cannot be undone."
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shares the per-user lifecycle group, so a wipe can never race that user's
+  # own start or destroy - which is exactly when the volume's attachment
+  # state is changing underneath us.
+  group: desktop-lifecycle-${{ inputs.guest_username }}
+  cancel-in-progress: false
+
+jobs:
+  wipe:
+    name: delete saved data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "DELETE" ]; then
+            echo "::error::Confirmation failed. Type DELETE exactly."
+            exit 1
+          fi
+          if [ -z "${{ inputs.guest_username }}" ]; then
+            echo "::error::guest_username is required - refusing to run without a target."
+            exit 1
+          fi
+
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::AWS secrets are not set."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=eu-central-1" >> "$GITHUB_ENV"
+
+      - name: Delete the volume
+        env:
+          HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+        run: |
+          set -uo pipefail
+          USER="${{ inputs.guest_username }}"
+
+          # Look up by the SAME tag pair the start workflow uses, so this can
+          # only ever match a desktop data volume belonging to this user - not
+          # the owner's own volume, not the hub's, not a root disk.
+          read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes \
+            --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=desktop-guest-data" \
+            --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
+
+          if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
+            echo "No saved data volume for '$USER' - nothing to delete."
+            echo "NOTHING_TO_DO=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "volume: $VOL  state=$STATE  attached_to=$ATTACHED"
+
+          # Refuse while it is attached. Deleting a volume out from under a
+          # running desktop would corrupt whatever is mid-write, and AWS would
+          # reject it anyway - failing here says why, clearly.
+          if [ "$STATE" != "available" ]; then
+            echo "::error::Volume $VOL is '$STATE' (attached to ${ATTACHED:-unknown})."
+            echo "::error::Destroy the desktop first, then delete the data."
+            exit 1
+          fi
+
+          aws ec2 delete-volume --volume-id "$VOL"
+          echo "deleted $VOL"
+
+          # Confirm it is really gone rather than trusting the call. describe
+          # on a deleted volume returns InvalidVolume.NotFound.
+          sleep 3
+          if aws ec2 describe-volumes --volume-ids "$VOL" >/dev/null 2>&1; then
+            echo "::warning::$VOL still visible to the API - deletion may still be settling."
+          else
+            echo "confirmed: $VOL no longer exists"
+          fi
+
+          if [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+            curl -fsS -X POST "https://desktop.mnour.dev/api/data-wiped" \
+              -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"$USER\"}" \
+              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "## Saved data deleted"
+            echo ""
+            if [ "${NOTHING_TO_DO:-false}" = "true" ]; then
+              echo "No volume existed for \`${{ inputs.guest_username }}\`. Nothing was changed."
+            else
+              echo "The saved data for \`${{ inputs.guest_username }}\` has been permanently deleted."
+              echo ""
+              echo "Their next desktop starts from a clean image. If they start with"
+              echo "\"keep my data\" again, a new empty volume is created."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

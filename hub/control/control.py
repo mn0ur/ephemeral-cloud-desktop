@@ -798,7 +798,14 @@ DESKTOP_PAGE = """<!doctype html>
 <div class="card">
   <div class="bar-top"><i></i><i></i><i></i></div>
   <h1>cloud desktop</h1>
-  <div class="sub">Sign in with your Google account. Choose to keep your data or not. Auto-ends after 4 hours of inactivity.</div>
+  <!-- This said "Auto-ends after 4 hours of inactivity" long after that was
+       switched off (see the 2026-08-10 spec, D2 - the idle reaper's schedule
+       is disabled because its activity tracker was never verified and could
+       destroy a desktop someone was using). Stale copy is bad anywhere; here
+       it was actively expensive, telling users they need not destroy anything
+       while a forgotten desktop billed indefinitely. -->
+  <div class="sub">Sign in with your Google account, then choose whether to keep your files.
+    <strong>Nothing shuts down on its own</strong> &mdash; click Destroy when you finish, or it keeps billing.</div>
 
   <div id="g-anon" class="g-signin"></div>
   <div id="g-signed" class="signed-in" style="display:none">

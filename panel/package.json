@@ -1,0 +1,11 @@
+{
+  "name": "desktop-control-panel",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Control plane for the ephemeral cloud desktop. Replaces the always-on hub instance.",
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "dependencies": {
+    "@upstash/redis": "^1.34.3"
+  }
+}

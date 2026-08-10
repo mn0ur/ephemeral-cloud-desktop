@@ -399,8 +399,20 @@ s = open(p).read().replace('__HOSTNAME__', host).replace('__HASH__', h)
 open(p, 'w').write(s)
 " "$HOSTNAME_FQDN" "$HASH"
 
-if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+# CF_API_TOKEN must be in scope for this validate call.
+#
+# This Caddyfile's desktop.mnour.dev block uses DNS-01 and references
+# {env.CF_API_TOKEN}. The real token reaches Caddy only through a systemd
+# drop-in, which a bare shell command cannot see - so validate reports a
+# PERFECTLY VALID config as invalid ("API token '' appears invalid") and this
+# gate then exits before Caddy ever starts. The result is both hub.mnour.dev
+# and desktop.mnour.dev refusing connections, with a config that was fine.
+#
+# This exact bug was fixed in the DESKTOP's template and missed here, so the
+# next hub replacement reproduced it faithfully. Same fix, same reason.
+if ! CF_API_TOKEN="$CF_DNS_TOKEN" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
   echo "FATAL: generated Caddyfile is invalid - refusing to restart Caddy."
+  CF_API_TOKEN="$CF_DNS_TOKEN" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || true
   exit 1
 fi
 

@@ -46,6 +46,7 @@ import json
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -72,6 +73,10 @@ LISTEN = ("127.0.0.1", 8000)
 # slots exist".
 SESSIONS_FILE = os.environ.get("SESSIONS_FILE", "/mnt/hubdata/control/sessions.json")
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
+
+# How often the panel probes for desktops it was never told about. One HTTP
+# request per registered user, so this must NOT run on every status poll.
+DISCOVERY_INTERVAL_S = int(os.environ.get("DISCOVERY_INTERVAL_S", "60"))
 
 # Measured spot price for c7i.xlarge in eu-central-1. Used only to show a
 # running estimate - the authoritative number is always the AWS bill.
@@ -120,8 +125,40 @@ def gh(method, path, payload=None):
         return json.loads(body) if body else {}
 
 
-def url_up(url, timeout=6):
-    """200 from <url>/healthz means running. Anything else means not ready."""
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def cached(key, ttl, producer):
+    """Memoise an expensive call for ttl seconds.
+
+    /api/status is polled every 5s by every open tab, and it had grown to do a
+    /healthz probe, three GitHub API calls and one more probe per registered
+    user - all synchronously, all with 6s timeouts. A single status call could
+    take 20+ seconds, and polls piled up behind each other until the whole
+    panel felt broken. Nothing in here changes fast enough to justify that:
+    a workflow step lasts tens of seconds and a desktop takes minutes to boot.
+    """
+    now = time.time()
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    value = producer()
+    with _CACHE_LOCK:
+        _CACHE[key] = (now, value)
+    return value
+
+
+def url_up(url, timeout=2.5):
+    """200 from <url>/healthz means running. Anything else means not ready.
+
+    Timeout is deliberately short. This runs inside the status poll, so a slow
+    or black-holed host must not stall the whole panel - and a desktop that
+    needs more than 2.5s to answer a static 200 is not ready anyway.
+    """
+    if not url:
+        return False
     ctx = ssl.create_default_context()
     try:
         req = urllib.request.Request(f"{url}/healthz", method="GET")
@@ -236,14 +273,49 @@ def refresh_sessions(sessions):
     # Every registered user has a deterministic hostname, so liveness can be
     # discovered by probing it. No AWS credentials needed, which keeps this
     # box free of them by design.
-    for username in (_load_users().get("by_sub") or {}).values():
-        if sessions.get(username, {}).get("status") in ("ready", "active", "pending"):
-            continue
-        url = f"https://{username}.{DESKTOP_DOMAIN}"
-        if url_up(url):
+    #
+    # Rate-limited hard: this is one HTTP probe PER REGISTERED USER, and it
+    # ran on every 5-second poll of every open tab, which is what made the
+    # whole panel crawl. A desktop that started without telling us is a rare
+    # recovery case, so checking every DISCOVERY_INTERVAL_S is ample.
+    if changed:
+        _save_sessions(sessions)
+
+    # Discovery runs in the BACKGROUND, never inline. Even rate-limited to
+    # once a minute, doing it inline meant one poll per minute paid for a
+    # probe per registered user - a visible 6s stall on an otherwise 0.4s
+    # endpoint. Results land in sessions.json and are picked up by the next
+    # poll, which is soon enough for a rare recovery case.
+    if now - _CACHE.get("discovery_at", (0, None))[0] >= DISCOVERY_INTERVAL_S:
+        with _CACHE_LOCK:
+            _CACHE["discovery_at"] = (now, True)
+        threading.Thread(target=_discover_orphans, daemon=True).start()
+
+    return sessions
+
+
+def _discover_orphans():
+    """Adopt desktops the session-ready callback never told us about.
+
+    Runs off the request path - see refresh_sessions. Re-reads sessions from
+    disk rather than trusting a snapshot, since a callback may have landed
+    while the probes were in flight.
+    """
+    try:
+        for username in (_load_users().get("by_sub") or {}).values():
+            sessions = _load_sessions()
+            if sessions.get(username, {}).get("status") in ("ready", "active", "pending"):
+                continue
+            url = f"https://{username}.{DESKTOP_DOMAIN}"
+            if not url_up(url):
+                continue
+            sessions = _load_sessions()
+            if sessions.get(username, {}).get("status") in ("ready", "active", "pending"):
+                continue  # a real callback won the race - leave it alone
+            prior = sessions.get(username) or {}
             sessions[username] = {
                 "status": "active",
-                "email": (sessions.get(username) or {}).get("email"),
+                "email": prior.get("email"),
                 "url": url,
                 # No password: it is generated inside the workflow and only
                 # ever reaches us through the callback. Recording the desktop
@@ -252,14 +324,29 @@ def refresh_sessions(sessions):
                 # that stops the billing.
                 "password": None,
                 "discovered": True,
-                "started_at": (sessions.get(username) or {}).get("started_at") or now,
+                "started_at": prior.get("started_at") or time.time(),
             }
-            changed = True
+            _save_sessions(sessions)
             log_event("discovered", username=username, url=url)
+    except Exception:
+        pass  # a failed probe sweep must never take the panel down
 
-    if changed:
-        _save_sessions(sessions)
-    return sessions
+
+def _worth_polling_progress(sessions, session):
+    """Only fetch workflow progress when something is mid-flight.
+
+    "Mid-flight" means the caller's own desktop is starting/booting, or - for
+    the admin - anyone's is. A panel showing a settled 'Running' or an empty
+    start button has nothing to report, so there is no reason to spend two
+    GitHub API calls per poll on it.
+    """
+    watch = {"pending", "ready"}
+    mine = sessions.get(session.get("user_id"), {}).get("status")
+    if mine in watch:
+        return True
+    if session.get("is_admin"):
+        return any(s.get("status") in watch for s in sessions.values())
+    return False
 
 
 def run_progress():
@@ -765,6 +852,15 @@ function renderMine(s){
   const box=$('mine');
   if(!session){ box.innerHTML=''; return; }
   const mine=s.my_session;
+  // While an action we dispatched is still in flight and the server has not
+  // caught up yet, keep showing it. Without this the next 5s poll rendered
+  // the plain Start button straight over the top of "Starting…"/"Destroying…",
+  // so every action looked like it had done nothing at all.
+  if(busy && !mine){
+    box.innerHTML = `<div><span class="dot work"></span> ${pending_action==='destroy'?'Destroying…':'Starting…'}</div>`
+      + stepsHtml(s.progress);
+    return;
+  }
   if(!mine || mine.status==='error'){
     box.innerHTML = `
       <label><input type="checkbox" id="persist"> Keep my data after destroy</label>
@@ -860,11 +956,25 @@ async function poll(){
 }
 
 function onGoogleCredential(resp){
+  $('err').textContent='';
+  $('g-anon').innerHTML='<div class="sub">Signing in…</div>';
   fetch('api/google-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential:resp.credential})})
     .then(r=>{ if(!r.ok) throw new Error('sign-in rejected'); return r.json() })
-    .catch(e=>{$('err').textContent=e.message});
+    // Reload rather than waiting for the next 5s poll. Google's button leaves
+    // its own state behind, and relying on the poll meant a successful
+    // sign-in looked like nothing had happened until the tab was closed and
+    // reopened - which is exactly how it was reported. A reload picks up the
+    // freshly-set cookie deterministically.
+    .then(()=>location.reload())
+    .catch(e=>{$('err').textContent=e.message; poll();});
 }
-$('g-signout').onclick=()=>fetch('api/google-logout',{method:'POST'});
+$('g-signout').onclick=()=>{
+  // disableAutoSelect stops Google silently re-issuing a credential for the
+  // same account on the next render, which made signing out look like it had
+  // not worked. Reload so the cleared cookie is reflected immediately.
+  try{ google.accounts.id.disableAutoSelect(); }catch(e){}
+  fetch('api/google-logout',{method:'POST'}).then(()=>location.reload());
+};
 
 async function go(action){
   $('err').textContent='';
@@ -961,16 +1071,33 @@ class Handler(BaseHTTPRequestHandler):
                         entry.pop("password", None)
                     visible[uname] = entry
 
+            # desktop_up probes the OWNER's legacy desk.mnour.dev, which only
+            # the hub page renders. On desktop.mnour.dev it is pure cost - and
+            # while that host sits parked at 192.0.2.1 the probe can only ever
+            # time out, adding 2.5s to a cold poll for a value nothing reads.
+            is_hub_page = not self.headers.get("Host", "").lower().startswith("desktop.")
+
             out = {
-                "desktop_up": desktop_up(),
-                "run": latest_run(),
+                # These hit the network. Cached, because a 5s poll interval
+                # does not mean any of this changes every 5s - and uncached
+                # they made the panel unusable.
+                "desktop_up": cached("desktop_up", 30, desktop_up) if is_hub_page else None,
+                "run": cached("latest_run", 10, latest_run),
                 "desktop_url": DESKTOP_URL,
                 "hourly_usd": HOURLY_USD,
                 "google_client_id": GOOGLE_CLIENT_ID,
                 "session": session,
                 "my_session": sessions.get(session["user_id"]) if session else None,
                 "sessions": visible,
-                "progress": run_progress() if session else None,
+                # Two GitHub API calls. Only fetched when something is actually
+                # in flight - a settled panel has no progress to show, and
+                # polling the Actions API every 5s forever would burn rate
+                # limit for nothing.
+                "progress": (
+                    cached("progress", 8, run_progress)
+                    if session and _worth_polling_progress(sessions, session)
+                    else None
+                ),
                 "active_count": active_count(sessions),
                 "max_concurrent": MAX_CONCURRENT if (session and session.get("is_admin")) else None,
             }

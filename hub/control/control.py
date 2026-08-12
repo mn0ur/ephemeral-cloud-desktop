@@ -61,7 +61,11 @@ DESKTOP_URL = os.environ.get("DESKTOP_URL", "https://desk.mnour.dev")
 # design, which is what lets refresh_sessions() discover a live desktop the
 # session-ready callback never told us about.
 DESKTOP_DOMAIN = os.environ.get("DESKTOP_DOMAIN", "desktop.mnour.dev")
-LISTEN = ("127.0.0.1", 8000)
+# 127.0.0.1 is right when something else (Caddy, on the AWS hub) terminates
+# TLS and proxies in - wrong for a bare Tailscale-only deployment, where
+# nothing else is in front and 127.0.0.1 would make the service unreachable
+# from any other tailnet member, including the Tailscale interface itself.
+LISTEN = (os.environ.get("HUB_BIND_HOST", "127.0.0.1"), int(os.environ.get("HUB_BIND_PORT", "8000")))
 
 # Where live guest session state persists across a hub restart. On the
 # hub's own EBS volume, same reasoning as Uptime Kuma's data: a service
@@ -92,6 +96,16 @@ ADMIN_GOOGLE_SUB = os.environ.get("ADMIN_GOOGLE_SUB", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
 HUB_CALLBACK_SECRET = os.environ.get("HUB_CALLBACK_SECRET", "")
 SESSION_MAX_AGE = 12 * 3600  # sign back in daily; nothing here needs longer
+
+# For a deployment where reachability IS the access control - this hub bound
+# to a Tailscale-only address, with no public route to it at all - a Google
+# sign-in screen in front of the only person who can ever load the page is
+# a second lock on a door that's already inside a locked house. TRUST_NETWORK
+# makes _session() synthesize the admin session Google would have produced,
+# so every existing is_admin/user_id check downstream needs no special-casing.
+# Never set this on a hub reachable from the public internet - it turns
+# "anyone who can open this URL" into "anyone who is admin".
+TRUST_NETWORK = os.environ.get("TRUST_NETWORK", "false").lower() == "true"
 
 # Fixed allow-list. Never build a workflow filename from request input.
 WORKFLOWS = {
@@ -1122,6 +1136,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _session(self):
+        if TRUST_NETWORK:
+            # sub == ADMIN_GOOGLE_SUB on purpose: the real is_admin check
+            # below (bool(ADMIN_GOOGLE_SUB) and payload["sub"] == ADMIN_GOOGLE_SUB)
+            # then evaluates true with no separate code path to keep in sync.
+            return {
+                "sub": ADMIN_GOOGLE_SUB,
+                "email": "owner@tailscale",
+                "user_id": "mnour",
+                "is_admin": bool(ADMIN_GOOGLE_SUB),
+            }
         raw = self.headers.get("Cookie", "")
         jar = http.cookies.SimpleCookie()
         try:

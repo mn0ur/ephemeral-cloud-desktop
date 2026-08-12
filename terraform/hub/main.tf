@@ -193,9 +193,10 @@ resource "aws_ebs_volume" "data" {
 
   tags = { Name = "mnour-hub-data" }
 
-  lifecycle {
-    prevent_destroy = true
-  }
+  # prevent_destroy removed 2026-08-12: this stack is being decommissioned -
+  # the hub now runs on the Pi (hub.mnour.dev -> Tailscale IP, tracked
+  # outside this state - see cloudflare_record.hub removal in the same
+  # commit). Nothing on this volume is still needed.
 }
 
 # ---------------------------------------------------------------------------

@@ -233,10 +233,16 @@ async function poll() {
     // Auto-open only on a START we initiated - without checking which action,
     // a destroy that briefly still saw an active session would send the user
     // INTO the desktop they just asked to tear down.
+    //
+    // A NEW TAB, not location.href: the desktop's login prompt asks for the
+    // username/password shown on THIS page. Navigating this tab away took the
+    // credentials off screen at the exact moment they were needed, leaving
+    // the login prompt with no way to answer it. Falling through to
+    // renderMine() below keeps this tab on the "Running" card with creds
+    // visible, whichever tab the user actually looks at.
     if (busy && pendingAction === "start" && s.my_session?.status === "active") {
       busy = false; pendingAction = null;
-      location.href = s.my_session.url;
-      return;
+      window.open(s.my_session.url, "_blank", "noopener");
     }
     if (busy && pendingAction === "destroy" && !s.my_session) { busy = false; pendingAction = null; }
 

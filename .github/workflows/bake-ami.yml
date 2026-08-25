@@ -11,13 +11,43 @@ permissions:
 
 env:
   AWS_REGION: ap-south-1
-  IMAGE: lscr.io/linuxserver/webtop:ubuntu-kde
+  # IMAGE is deliberately NOT hardcoded here. It was, and it drifted: this
+  # workflow baked ubuntu-kde while terraform/variables.tf's var.image
+  # actually launches debian-kde. The bake "succeeded", the AMI looked
+  # correct, and every boot still pulled its 2GB image from the registry -
+  # while ALSO paying extra snapshot-restore latency for 2GB of layers
+  # nothing would ever use. Net effect was a SLOWER boot than no AMI at all
+  # (383s vs ~325s measured), and nothing detected it because both halves
+  # were independently self-consistent.
+  #
+  # The value is now read out of terraform/variables.tf at run time, so
+  # there is exactly one source of truth and this cannot drift again.
 
 jobs:
   bake:
     name: launch, pull image, snapshot, terminate
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the desktop image from terraform, the single source of truth
+        run: |
+          set -euo pipefail
+          IMAGE=$(python3 - <<'PY'
+          import re, sys
+          src = open('terraform/variables.tf').read()
+          block = re.search(r'variable\s+"image"\s*\{(.*?)\n\}', src, re.S)
+          if not block:
+              sys.exit('could not find variable "image" in terraform/variables.tf')
+          default = re.search(r'default\s*=\s*"([^"]+)"', block.group(1))
+          if not default:
+              sys.exit('variable "image" has no literal default to bake')
+          print(default.group(1))
+          PY
+          )
+          echo "baking the image terraform actually launches: $IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
       - name: Configure AWS
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

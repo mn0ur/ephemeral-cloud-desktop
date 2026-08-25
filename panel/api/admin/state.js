@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ google_client_id: GOOGLE_CLIENT_ID, session: null });
   }
   if (!session.is_admin) {
-    return res.status(403).json({ error: "admin only" });
+    return res.status(403).json({ error: "admin only", session });
   }
 
   return res.status(200).json({

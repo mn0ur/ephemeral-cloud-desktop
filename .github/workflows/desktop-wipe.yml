@@ -33,6 +33,9 @@ jobs:
     name: delete saved data
     runs-on: ubuntu-latest
 
+    # Deleting a volume is a handful of API calls; anything longer is stuck.
+    timeout-minutes: 15
+
     # Region and zone in ONE place. They used to be repeated inline in every
     # aws call and every AWS_DEFAULT_REGION export, which is how a region move
     # turns into a hunt. ap-south-1c specifically: spot there is $0.0529/hr

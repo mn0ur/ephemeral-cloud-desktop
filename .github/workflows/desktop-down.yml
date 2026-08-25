@@ -31,6 +31,11 @@ jobs:
     name: terraform destroy
     runs-on: ubuntu-latest
 
+    # A destroy that hangs holds this username's concurrency slot and its state
+    # lock, so the user cannot retry and the reaper cannot step in either.
+    # Fail fast instead of burning GitHub's 6-hour default.
+    timeout-minutes: 15
+
     # Measured: 119s total, 109s of it inside "terraform destroy" - and a
     # large part of that is `terraform init` re-downloading providers. Same
     # cache and same key as desktop-up.yml, so a start warms the cache that
@@ -94,8 +99,10 @@ jobs:
           if [ -n "${{ inputs.guest_username }}" ]; then
             KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
           fi
-          terraform -chdir=terraform init -input=false -backend-config="key=$KEY"
-          terraform -chdir=terraform destroy -auto-approve -input=false
+          # See desktop-up.yml: lock contention with the reaper or a racing
+          # apply should be a short wait, not an immediate failure.
+          terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
+          terraform -chdir=terraform destroy -auto-approve -input=false -lock-timeout=180s
 
       - name: Tell desktop.mnour.dev this username is free
         if: inputs.guest_username != ''

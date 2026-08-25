@@ -52,6 +52,10 @@ on:
         description: "True if this session is a guest (no persist option, subject to the reaper's time limit). Set by the panel; false for anything dispatched by hand."
         type: boolean
         default: false
+      use_spot:
+        description: "Spot is ~4x cheaper but can be unfulfillable - c7i.xlarge in ap-south-1c had no capacity twice on 2026-08-25, and a spot request that is never fulfilled just hangs the apply until the job timeout. Set false to retry the same session on-demand instead of waiting for capacity."
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -68,6 +72,14 @@ jobs:
   start:
     name: terraform apply
     runs-on: ubuntu-latest
+
+    # An unfulfillable spot request does NOT fail - terraform sits in "Still
+    # creating..." until something kills it. Without this, that is GitHub's
+    # 6-hour default: six hours of a held runner, a held concurrency slot, and
+    # a state lock nobody can clear without `force-unlock`. Observed for real
+    # on 2026-08-25 (two consecutive c7i.xlarge capacity stalls, cancelled by
+    # hand at 11 and 19 minutes). 25 minutes is ~5x the worst healthy apply.
+    timeout-minutes: 25
 
     # Measured on run 31376162950: the job took 112s, and 87s of that was the
     # single "terraform apply" step - most of it `terraform init` downloading
@@ -159,13 +171,18 @@ jobs:
           TF_VAR_cloudflare_dns_api_token: ${{ inputs.guest_username != '' && secrets.CLOUDFLARE_API_TOKEN || '' }}
           TF_VAR_enable_access: ${{ inputs.enable_access }}
           TF_VAR_is_guest: ${{ inputs.is_guest }}
+          TF_VAR_use_spot: ${{ inputs.use_spot }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
             KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
           fi
-          terraform -chdir=terraform init -input=false -backend-config="key=$KEY"
-          terraform -chdir=terraform apply -auto-approve -input=false
+          # -lock-timeout instead of failing instantly: the reaper, a manual
+          # destroy and this apply can all target one username's state, and
+          # "someone else holds the lock for 4 more seconds" should be a wait,
+          # not a hard error that leaves the user staring at a failed run.
+          terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
+          terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s
 
       - name: Tell desktop.mnour.dev the guest session is ready
         # The control panel holds no AWS or Terraform credentials - by design,

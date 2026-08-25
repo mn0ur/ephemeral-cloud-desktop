@@ -19,10 +19,25 @@ on:
 permissions:
   contents: read
 
+# A reaper run destroying several desktops takes minutes, and the cron fires
+# every 5 - so two runs CAN overlap, and when they do they both discover the
+# same expired desktop and both start destroying it, colliding on one state
+# lock. cancel-in-progress is deliberately false: killing a destroy midway is
+# how a half-torn-down desktop and a stale lock get created. The next tick is
+# only 5 minutes away, so skipping is always the cheaper choice.
+concurrency:
+  group: desktop-reaper
+  cancel-in-progress: false
+
 jobs:
   reap:
     name: destroy anything past its time limit
     runs-on: ubuntu-latest
+
+    # Bounded so a single wedged destroy cannot hold the concurrency group
+    # above (and therefore block every later tick) for GitHub's 6-hour
+    # default. Generous enough for a fan-out of several sequential destroys.
+    timeout-minutes: 30
 
     env:
       AWS_REGION: ap-south-1
@@ -85,15 +100,28 @@ jobs:
 
             if [ "$AGE_S" -ge "$LIMIT_S" ]; then
               echo "$USERNAME: age ${AGE_S}s >= ${LIMIT_S}s limit - destroying"
-              terraform -chdir=terraform init -input=false -reconfigure \
+              # -lock-timeout, not instant failure: this races a user clicking
+              # Destroy on the very desktop being reaped, which is a wait-your-
+              # turn situation, not an error.
+              terraform -chdir=terraform init -input=false -reconfigure -lock-timeout=180s \
                 -backend-config="key=desktop/user-$USERNAME/terraform.tfstate"
-              TF_VAR_username="$USERNAME" terraform -chdir=terraform destroy -auto-approve -input=false
 
-              curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
-                -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
-                -H "Content-Type: application/json" \
-                -d "{\"username\":\"$USERNAME\",\"reason\":\"time_limit\"}" \
-                || echo "::warning::callback failed for $USERNAME - destroy already succeeded"
+              # The callback is gated on the destroy ACTUALLY succeeding. Posting
+              # session-ended unconditionally tells the panel the desktop is gone
+              # while it is still running and still billing - the panel drops the
+              # session, so the user loses the Destroy button for a machine that
+              # is very much alive. A failure here is left for the next tick,
+              # which will rediscover the same still-expired instance.
+              if TF_VAR_username="$USERNAME" terraform -chdir=terraform destroy \
+                   -auto-approve -input=false -lock-timeout=180s; then
+                curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
+                  -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"username\":\"$USERNAME\",\"reason\":\"time_limit\"}" \
+                  || echo "::warning::callback failed for $USERNAME - destroy already succeeded"
+              else
+                echo "::error::terraform destroy FAILED for $USERNAME - instance may still be running and billing. Not posting session-ended; the next tick will retry."
+              fi
             else
               echo "$USERNAME: age ${AGE_S}s, under the ${LIMIT_S}s limit - leaving it"
             fi

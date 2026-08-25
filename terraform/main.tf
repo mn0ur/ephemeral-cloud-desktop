@@ -255,23 +255,41 @@ resource "aws_iam_instance_profile" "desktop" {
 # Instance
 # ---------------------------------------------------------------------------
 
-data "aws_ami" "ubuntu" {
+# The baked AMI from .github/workflows/bake-ami.yml: plain Ubuntu 24.04 with
+# docker installed and the ~2GB desktop image ALREADY PULLED into the local
+# containerd store. That pull was the single largest cost in boot-to-ready
+# (~4 minutes measured), and it was paid on every single cold start because
+# an ephemeral session has nowhere to cache it.
+#
+# It helps both session shapes, for different reasons:
+#   - ephemeral (guest, persist=false): no volume is bind-mounted over
+#     /var/lib/containerd, so the baked layers are simply already there.
+#   - persistent (owner / permanent user): user-data.sh.tpl SEEDS an empty
+#     data volume from /var/lib/containerd before starting containerd, so the
+#     first boot does a local disk copy instead of a Docker Hub pull.
+#
+# most_recent + tag filter rather than a pinned id, so re-running the bake
+# workflow is picked up with no Terraform change. Re-run it when the upstream
+# image or base OS needs to move; nothing here has to be edited.
+data "aws_ami" "desktop" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical
+  owners      = ["self"]
 
   filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+    name   = "tag:Project"
+    values = ["ephemeral-desktop"]
   }
 
+  # A bake that failed partway can leave an AMI behind in a non-usable state;
+  # launching from one fails late and confusingly.
   filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
+    name   = "state"
+    values = ["available"]
   }
 }
 
 resource "aws_instance" "desktop" {
-  ami           = data.aws_ami.ubuntu.id
+  ami           = data.aws_ami.desktop.id
   instance_type = var.instance_type
   subnet_id     = data.terraform_remote_state.network.outputs.subnet_id
   vpc_security_group_ids = [

@@ -4,5 +4,13 @@
     "api/**/*.js": {
       "maxDuration": 10
     }
-  }
+  },
+  "redirects": [
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
+      "destination": "/admin.html",
+      "permanent": false
+    }
+  ]
 }

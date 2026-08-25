@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   // The username is NEVER taken from the request body for the caller's own
   // actions - always from their verified session, so nobody can start or
   // destroy a desktop under someone else's name.
-  const session = sessionFromRequest(req);
+  const session = await sessionFromRequest(req);
   if (!session) return res.status(401).json({ error: "sign in first" });
   const me = session.user_id;
 
@@ -40,11 +40,15 @@ export default async function handler(req, res) {
       return res.status(503).json({ error: "all desktops are busy right now - try again shortly" });
     }
 
-    const persist = Boolean(req.body?.persist);
+    // A guest cannot forge "persist: true" in the request body - the
+    // client only shows the checkbox when can_persist is true, but the
+    // server is the actual enforcement point.
+    const persist = session.can_persist && Boolean(req.body?.persist);
     await putSession(me, {
       status: "pending",
       email: session.email,
       dispatched_at: Date.now() / 1000,
+      is_guest: !session.can_persist,
     });
     await logEvent("login_start", { username: me, email: session.email, persist });
 
@@ -55,6 +59,7 @@ export default async function handler(req, res) {
         guest_username: me,
         owner_email: session.email,
         persist: persist ? "true" : "false",
+        is_guest: session.can_persist ? "false" : "true",
       });
     } catch (e) {
       // Roll back on ANY dispatch failure - a GitHub outage, a revoked token or

@@ -7,9 +7,9 @@
 // keeps this dependency-light.
 
 import crypto from "node:crypto";
+import { isAdmin, isPermanentUser } from "./state.js";
 
 export const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-export const ADMIN_GOOGLE_SUB = process.env.ADMIN_GOOGLE_SUB || "";
 export const SESSION_SECRET = process.env.SESSION_SECRET || "";
 export const HUB_CALLBACK_SECRET = process.env.HUB_CALLBACK_SECRET || "";
 export const SESSION_MAX_AGE = 12 * 3600;
@@ -39,15 +39,19 @@ export function verifySession(value) {
     return null;
   }
   if (!payload.exp || payload.exp < Date.now() / 1000) return null;
-  payload.is_admin = Boolean(ADMIN_GOOGLE_SUB) && payload.sub === ADMIN_GOOGLE_SUB;
   return payload;
 }
 
-export function sessionFromRequest(req) {
+export async function sessionFromRequest(req) {
   const raw = req.headers.cookie || "";
   const match = raw.split(/;\s*/).find((c) => c.startsWith("session="));
   if (!match) return null;
-  return verifySession(decodeURIComponent(match.slice("session=".length)));
+  const payload = verifySession(decodeURIComponent(match.slice("session=".length)));
+  if (!payload) return null;
+  const admin = await isAdmin(payload.email);
+  payload.is_admin = admin;
+  payload.can_persist = admin || (await isPermanentUser(payload.email));
+  return payload;
 }
 
 export function sessionCookie(value, maxAge) {

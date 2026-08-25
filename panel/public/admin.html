@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>cloud desktop</title>
+<title>admin console</title>
 <style>
  /* Tokens copied from mnour.dev so the panel, the portfolio and the desktop
     read as one system. */
@@ -63,6 +63,10 @@
  .s-bad{color:var(--red);min-width:62px}
  .s-run{color:var(--amber);min-width:62px;animation:p 1s infinite}
  .s-skip,.s-wait{color:var(--mute);min-width:62px}
+ .sess-row{display:flex;justify-content:space-between;align-items:center;gap:.8rem;
+   padding:.55rem 0;border-bottom:1px solid var(--border)}
+ .sess-row:last-child{border-bottom:none}
+ .sess-row button{flex:none;min-width:auto;padding:.4rem .8rem;font-size:.74rem}
  .who{font-size:.72rem;color:var(--mute);word-break:break-all}
  table{width:100%;border-collapse:collapse;font-size:.74rem}
  th{text-align:left;color:var(--dim);font-weight:400;padding:.3rem .5rem;border-bottom:1px solid var(--border)}
@@ -76,9 +80,8 @@
 
 <div class="card">
   <div class="bar-top"><i></i><i></i><i></i></div>
-  <h1>cloud desktop</h1>
-  <div class="sub">Sign in with your Google account, then choose whether to keep your files.
-    <strong>Nothing shuts down on its own</strong> &mdash; click Destroy when you finish, or it keeps billing.</div>
+  <h1>admin console</h1>
+  <div class="sub">Sign in with an admin Google account.</div>
 
   <div id="g-wrap" class="g-wrap"></div>
   <div id="g-signed" class="signed-in" style="display:none">
@@ -86,12 +89,47 @@
   </div>
   <div id="g-disabled" class="sub" style="display:none;text-align:center;padding:1rem 0">
     Sign-in is not configured on this deployment.</div>
-
-  <div id="mine"></div>
+  <div id="not-admin" class="sub" style="display:none;text-align:center;padding:1rem 0">
+    Signed in, but this account is not an admin.</div>
   <div id="err" class="err"></div>
 </div>
 
+<div id="sessions-card" class="card" style="display:none">
+  <h2>All sessions</h2>
+  <div id="sessions"></div>
+</div>
+
+<div id="config-card" class="card" style="display:none">
+  <h2>Guest time limit</h2>
+  <div class="row">
+    <input id="limit-input" type="number" min="1" style="width:6rem">
+    <button id="limit-save" class="go">Save</button>
+  </div>
+  <div class="sub" style="margin-top:.4rem">Minutes before a guest session is auto-destroyed.</div>
+</div>
+
+<div id="tiers-card" class="card" style="display:none">
+  <h2>Admins</h2>
+  <div id="admin-list"></div>
+  <div class="row">
+    <input id="admin-email" type="email" placeholder="email@example.com" style="flex:1">
+    <button id="admin-add" class="go">Add</button>
+  </div>
+
+  <h2 style="margin-top:1.2rem">Permanent users</h2>
+  <div id="permanent-list"></div>
+  <div class="row">
+    <input id="permanent-email" type="email" placeholder="email@example.com" style="flex:1">
+    <button id="permanent-add" class="go">Add</button>
+  </div>
+</div>
+
+<div id="history-card" class="card" style="display:none">
+  <h2>History</h2>
+  <div id="history"></div>
+</div>
+
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="/app.js"></script>
+<script src="/admin.js"></script>
 </body>
 </html>

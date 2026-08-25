@@ -1,5 +1,5 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
-import { loadSessions, putSession, logEvent } from "../lib/state.js";
+import { loadSessions, putSession, logEvent, getGuestLimitMinutes } from "../lib/state.js";
 
 // Called by desktop-up.yml once terraform apply succeeds. This deployment holds
 // no AWS or Terraform credentials by design, so it cannot read `terraform
@@ -20,12 +20,17 @@ export default async function handler(req, res) {
   // leave a desktop nobody can destroy from the panel.
   const email = prior.email || req.body?.owner_email || null;
 
+  const launchedAt = Number(req.body?.launched_at);
+  const startedAt = Number.isFinite(launchedAt) && launchedAt > 0 ? launchedAt : Date.now() / 1000;
+  const isGuest = Boolean(prior.is_guest);
   await putSession(username, {
     status: "ready", // the page polls /healthz before calling it active
     email,
     url: req.body?.url || null,
     password: req.body?.password || null,
-    started_at: Date.now() / 1000,
+    started_at: startedAt,
+    is_guest: isGuest,
+    ...(isGuest ? { expires_at: startedAt + (await getGuestLimitMinutes()) * 60 } : {}),
   });
   await logEvent("start", { username, email, url: req.body?.url });
   return res.status(200).json({ ok: true });

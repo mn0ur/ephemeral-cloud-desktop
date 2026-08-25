@@ -1,61 +1,44 @@
 name: Desktop - REAPER
 
-# Per-user desktops have no fixed session length any more - a guest who
-# closes the tab and never clicks Destroy would otherwise bill $0.104/hr
-# indefinitely. This is what enforces "destroy after 4 hours of not being
-# USED" (not "4 hours after launch regardless of use") in practice.
+# Per-user desktops carry a hard time limit set on the admin console
+# (admin.desktop.mnour.dev) and enforced here by comparing each guest
+# instance's LaunchTime (from the EC2 API) against that limit - not an
+# in-guest activity tracker, which was never verified against real traffic
+# and whose failure mode (silently going stale) is worse than this one's
+# (a few minutes of scheduling drift, accepted).
 #
 # There is no fixed list of usernames to loop over - discovery is by AWS
 # tag (Role=guest-desktop), not a hardcoded set. The owner's own desktop
-# carries no such tag and is never touched by this workflow.
-#
-# ---------------------------------------------------------------------------
-# THE SCHEDULE IS DELIBERATELY DISABLED. Do not re-enable it without first
-# verifying the activity tracker on a real desktop.
-#
-# This reaper trusts /last-activity, a file kept current by an
-# activity-tracker service tailing Caddy's access log. That service has
-# never been verified against real traffic, and its two failure modes are
-# NOT equally safe:
-#
-#   pattern doesn't match  -> monitoring counts as activity -> never
-#                             destroys anything. Harmless.
-#   tracker service dead   -> the file is written ONCE at boot, so it keeps
-#                             returning a valid-looking number forever ->
-#                             this workflow destroys a desktop someone is
-#                             actively working in, 4h after it booted.
-#
-# The second one loses a user's session mid-use. Running an unverified
-# auto-destroyer on a 15-minute cron is not worth that.
-#
-# Consequence, accepted knowingly: nothing stops a forgotten desktop
-# billing at $0.104/hr. Visible in the control panel (running time and
-# session cost) and manually destroyable, which is adequate for a single
-# operator - and NOT adequate once real guests use this.
-#
-# When that gap needs closing, prefer a MAX-SESSION-AGE reaper over this
-# one: LaunchTime comes from the EC2 API, so it depends on nothing running
-# inside the instance and has no unverifiable moving parts.
-# ---------------------------------------------------------------------------
+# and any permanent user's desktop carry no such tag and are never
+# touched by this workflow.
 on:
-  workflow_dispatch: {} # manual only - see above before adding a schedule
+  workflow_dispatch: {}
+  schedule:
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
 
-env:
-  IDLE_LIMIT_S: 14400 # 4 hours
+# A reaper run destroying several desktops takes minutes, and the cron fires
+# every 5 - so two runs CAN overlap, and when they do they both discover the
+# same expired desktop and both start destroying it, colliding on one state
+# lock. cancel-in-progress is deliberately false: killing a destroy midway is
+# how a half-torn-down desktop and a stale lock get created. The next tick is
+# only 5 minutes away, so skipping is always the cheaper choice.
+concurrency:
+  group: desktop-reaper
+  cancel-in-progress: false
 
 jobs:
   reap:
-    name: destroy anything idle past the limit
+    name: destroy anything past its time limit
     runs-on: ubuntu-latest
 
-    # Region and zone in ONE place. They used to be repeated inline in every
-    # aws call and every AWS_DEFAULT_REGION export, which is how a region move
-    # turns into a hunt. ap-south-1c specifically: spot there is $0.0529/hr
-    # against $0.0651 in ap-south-1a - the zone a hardcoded "a" would have
-    # picked - and 47% under eu-central-1.
+    # Bounded so a single wedged destroy cannot hold the concurrency group
+    # above (and therefore block every later tick) for GitHub's 6-hour
+    # default. Generous enough for a fan-out of several sequential destroys.
+    timeout-minutes: 30
+
     env:
       AWS_REGION: ap-south-1
       AWS_AZ: ap-south-1c
@@ -79,7 +62,7 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
           echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
-      - name: Discover every live guest desktop, destroy anything idle
+      - name: Discover every live guest desktop, destroy anything past the limit
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
@@ -87,43 +70,59 @@ jobs:
           set -uo pipefail
           NOW=$(date -u +%s)
 
-          USERNAMES=$(aws ec2 describe-instances --region "$AWS_REGION" \
+          LIMIT_MIN=$(curl -fsS -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+            https://desktop.mnour.dev/api/admin/config | jq -r '.guest_limit_minutes')
+          if ! [[ "$LIMIT_MIN" =~ ^[0-9]+$ ]]; then
+            echo "::error::could not read guest_limit_minutes from the panel ('$LIMIT_MIN') - not destroying anything this run"
+            exit 1
+          fi
+          LIMIT_S=$((LIMIT_MIN * 60))
+          echo "current guest limit: ${LIMIT_MIN}m (${LIMIT_S}s)"
+
+          # LaunchTime and username together, tab-separated - LaunchTime alone
+          # cannot be joined back to a username without a second API call per
+          # instance.
+          ROWS=$(aws ec2 describe-instances --region "$AWS_REGION" \
             --filters "Name=tag:Role,Values=guest-desktop" "Name=instance-state-name,Values=running,pending" \
-            --query 'Reservations[].Instances[].Tags[?Key==`Owner`].Value | [0]' \
+            --query 'Reservations[].Instances[].[Tags[?Key==`Owner`]|[0].Value,LaunchTime]' \
             --output text)
 
-          if [ -z "$USERNAMES" ]; then
+          if [ -z "$ROWS" ]; then
             echo "no guest desktops currently running"
             exit 0
           fi
 
-          for USERNAME in $USERNAMES; do
-            URL="https://$USERNAME.desktop.mnour.dev"
-            LAST=$(curl -fsS --max-time 8 "$URL/last-activity" 2>/dev/null || echo "")
+          echo "$ROWS" | while IFS=$'\t' read -r USERNAME LAUNCH_TIME; do
+            [ -z "$USERNAME" ] && continue
+            [ "$USERNAME" = "None" ] && continue
+            LAUNCH_S=$(date -u -d "$LAUNCH_TIME" +%s)
+            AGE_S=$((NOW - LAUNCH_S))
 
-            if ! [[ "$LAST" =~ ^[0-9]+$ ]]; then
-              # Can't reach it, or it hasn't finished booting yet - do not
-              # destroy on the strength of a failed HTTP request. A network
-              # blip must never look the same as genuine inactivity.
-              echo "$USERNAME: /last-activity unreachable or malformed ('$LAST') - leaving it, not treating as idle"
-              continue
-            fi
-
-            IDLE_S=$((NOW - LAST))
-            if [ "$IDLE_S" -ge "$IDLE_LIMIT_S" ]; then
-              echo "$USERNAME: idle ${IDLE_S}s >= ${IDLE_LIMIT_S}s limit - destroying"
-              terraform -chdir=terraform init -input=false -reconfigure \
+            if [ "$AGE_S" -ge "$LIMIT_S" ]; then
+              echo "$USERNAME: age ${AGE_S}s >= ${LIMIT_S}s limit - destroying"
+              # -lock-timeout, not instant failure: this races a user clicking
+              # Destroy on the very desktop being reaped, which is a wait-your-
+              # turn situation, not an error.
+              terraform -chdir=terraform init -input=false -reconfigure -lock-timeout=180s \
                 -backend-config="key=desktop/user-$USERNAME/terraform.tfstate"
-              TF_VAR_username="$USERNAME" terraform -chdir=terraform destroy -auto-approve -input=false
 
-              if [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+              # The callback is gated on the destroy ACTUALLY succeeding. Posting
+              # session-ended unconditionally tells the panel the desktop is gone
+              # while it is still running and still billing - the panel drops the
+              # session, so the user loses the Destroy button for a machine that
+              # is very much alive. A failure here is left for the next tick,
+              # which will rediscover the same still-expired instance.
+              if TF_VAR_username="$USERNAME" terraform -chdir=terraform destroy \
+                   -auto-approve -input=false -lock-timeout=180s; then
                 curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
                   -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
                   -H "Content-Type: application/json" \
-                  -d "{\"username\":\"$USERNAME\",\"reason\":\"idle\"}" \
+                  -d "{\"username\":\"$USERNAME\",\"reason\":\"time_limit\"}" \
                   || echo "::warning::callback failed for $USERNAME - destroy already succeeded"
+              else
+                echo "::error::terraform destroy FAILED for $USERNAME - instance may still be running and billing. Not posting session-ended; the next tick will retry."
               fi
             else
-              echo "$USERNAME: idle ${IDLE_S}s, under the ${IDLE_LIMIT_S}s limit - leaving it"
+              echo "$USERNAME: age ${AGE_S}s, under the ${LIMIT_S}s limit - leaving it"
             fi
           done

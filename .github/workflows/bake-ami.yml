@@ -1,0 +1,101 @@
+name: Bake Desktop AMI
+
+# Manual only - this is not something that should run on every push. Run it
+# when the desktop image (linuxserver/webtop) or base OS packages change and
+# a fresh boot needs to pick that up.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  IMAGE: lscr.io/linuxserver/webtop:ubuntu-kde
+
+jobs:
+  bake:
+    name: launch, pull image, snapshot, terminate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
+
+      - name: Launch a throwaway instance in the default VPC
+        run: |
+          set -euo pipefail
+          BASE_AMI=$(aws ec2 describe-images --owners 099720109477 \
+            --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" \
+                       "Name=virtualization-type,Values=hvm" \
+            --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+          echo "base AMI: $BASE_AMI"
+
+          SUBNET=$(aws ec2 describe-subnets \
+            --filters "Name=default-for-az,Values=true" \
+            --query 'Subnets[0].SubnetId' --output text)
+
+          cat > bake-user-data.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          apt-get update -y
+          apt-get install -y --no-install-recommends docker.io
+          systemctl enable --now docker
+          docker pull "$IMAGE_PLACEHOLDER"
+          touch /home/ubuntu/bake-complete
+          EOF
+          sed -i "s|\$IMAGE_PLACEHOLDER|$IMAGE|" bake-user-data.sh
+
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "$BASE_AMI" --instance-type t3.medium \
+            --subnet-id "$SUBNET" --associate-public-ip-address \
+            --user-data file://bake-user-data.sh \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ami-bake-temp}]' \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+
+      - name: Wait for the image pull to finish
+        run: |
+          # No SSM/instance-role on this throwaway box - poll console output
+          # for the completion marker instead of anything requiring inbound
+          # access. Docker pulling ~2GB comfortably finishes well inside 10
+          # minutes; if it doesn't, something is actually wrong and should
+          # fail loud rather than snapshot a half-pulled image.
+          FOUND=0
+          for i in $(seq 1 30); do
+            OUT=$(aws ec2 get-console-output --instance-id "$INSTANCE_ID" --output text --query Output || true)
+            if echo "$OUT" | grep -q "bake-complete\|cloud-init.*finished"; then
+              FOUND=1
+              sleep 30 # give dockerd a moment to flush the pulled layers to disk
+              break
+            fi
+            sleep 20
+          done
+          if [ "$FOUND" -ne 1 ]; then
+            echo "Timed out waiting for the image pull to finish - refusing to snapshot a half-pulled image" >&2
+            exit 1
+          fi
+
+      - name: Snapshot into an AMI
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y%m%d%H%M%S)
+          AMI_ID=$(aws ec2 create-image \
+            --instance-id "$INSTANCE_ID" \
+            --name "ephemeral-desktop-baked-$STAMP" \
+            --tag-specifications "ResourceType=image,Tags=[{Key=Project,Value=ephemeral-desktop},{Key=BakedAt,Value=$STAMP}]" \
+            --query ImageId --output text)
+          echo "baked AMI: $AMI_ID - waiting for it to become available"
+          aws ec2 wait image-available --image-ids "$AMI_ID"
+          echo "## AMI baked" >> "$GITHUB_STEP_SUMMARY"
+          echo "$AMI_ID, tagged Project=ephemeral-desktop" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terminate the throwaway instance
+        if: always()
+        run: aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" || true

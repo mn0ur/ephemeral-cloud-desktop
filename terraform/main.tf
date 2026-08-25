@@ -15,6 +15,16 @@ data "terraform_remote_state" "persistent" {
   }
 }
 
+data "terraform_remote_state" "network" {
+  backend = "s3"
+
+  config = {
+    bucket = "ephemeral-desktop-643902831477-tfstate"
+    key    = "network/terraform.tfstate"
+    region = "me-central-1"
+  }
+}
+
 locals {
   account_id = data.aws_caller_identity.current.account_id
 
@@ -79,86 +89,18 @@ data "aws_ebs_volume" "data" {
 # have.
 # ---------------------------------------------------------------------------
 
-resource "aws_vpc" "main" {
-  cidr_block           = "10.20.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = { Name = local.display }
-}
-
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = local.display }
-}
-
-data "aws_availability_zones" "available" {
-  state = "available"
-}
-
-resource "aws_subnet" "public" {
-  vpc_id     = aws_vpc.main.id
-  cidr_block = "10.20.1.0/24"
-  # Pinned rather than taken from the AZ list: the instance must land in the
-  # same zone as the persistent EBS volume, or attachment fails.
-  availability_zone       = local.az
-  map_public_ip_on_launch = true
-
-  tags = { Name = "${local.display}-public" }
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-
-  tags = { Name = "${local.display}-public" }
-}
-
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
-}
-
 # ---------------------------------------------------------------------------
 # Security group.
 #
 # No port 22. Shell access is via SSM Session Manager, which needs no inbound
 # rule at all. HTTP is open only because Let's Encrypt validates over HTTP-01;
 # Caddy redirects it to HTTPS.
+#
+# The security group itself, plus the always-on HTTP/HTTPS/SSH/egress rules,
+# now live in terraform/network - shared by every session, any tier, any
+# concurrency slot. Only the Cloudflare-only rule below stays here: it is
+# conditional on this session's own var.enable_access, so it cannot be shared.
 # ---------------------------------------------------------------------------
-
-resource "aws_security_group" "desktop" {
-  name        = "${local.name}-sg"
-  description = "Desktop: HTTPS UI and WebRTC media. No SSH - SSM only."
-  vpc_id      = aws_vpc.main.id
-
-  tags = { Name = local.display }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "http" {
-  security_group_id = aws_security_group.desktop.id
-  description       = "Lets Encrypt HTTP-01 challenge and redirect to HTTPS"
-  cidr_ipv4         = "0.0.0.0/0"
-  from_port         = 80
-  to_port           = 80
-  ip_protocol       = "tcp"
-}
-
-# Without Access: 443 open to the world, Caddy basic auth the only barrier.
-resource "aws_vpc_security_group_ingress_rule" "https" {
-  count = local.access_enabled ? 0 : 1
-
-  security_group_id = aws_security_group.desktop.id
-  description       = "webtop UI via Caddy"
-  cidr_ipv4         = "0.0.0.0/0"
-  from_port         = 443
-  to_port           = 443
-  ip_protocol       = "tcp"
-}
 
 # With Access: 443 reachable ONLY from Cloudflare's own network.
 #
@@ -173,10 +115,36 @@ resource "aws_vpc_security_group_ingress_rule" "https" {
 # list, so they follow Cloudflare's published set instead of going stale.
 data "cloudflare_ip_ranges" "cloudflare" {}
 
+# Session-scoped, unlike the shared network stack's SG: Access mode is a
+# per-session setting, and a shared SG can't hold one session's "restrict to
+# Cloudflare only" state without leaking it onto every concurrent session
+# using the same SG. This one is created and destroyed with the instance.
+resource "aws_security_group" "session_access" {
+  name        = "${local.name}-access"
+  description = "Per-session HTTPS ingress: open when Access mode is off, Cloudflare-only when it's on."
+  vpc_id      = data.terraform_remote_state.network.outputs.vpc_id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "https_open" {
+  count = local.access_enabled ? 0 : 1
+
+  security_group_id = aws_security_group.session_access.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "session_access_all" {
+  security_group_id = aws_security_group.session_access.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+
 resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
   for_each = local.access_enabled ? toset(data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks) : toset([])
 
-  security_group_id = aws_security_group.desktop.id
+  security_group_id = aws_security_group.session_access.id
   description       = "webtop UI via Caddy - Cloudflare edge only (Access enforced there)"
   cidr_ipv4         = each.value
   from_port         = 443
@@ -187,13 +155,6 @@ resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
 // No UDP rule. The Selkies engine streams over a single TCP connection, so the
 // 100-port UDP range that neko's WebRTC media required is gone entirely -
 // and with it the reason Cloudflare's proxy could not sit in front.
-
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.desktop.id
-  description       = "Image pulls, package installs, S3, ACME"
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "-1"
-}
 
 # ---------------------------------------------------------------------------
 # IAM. Scoped to this one bucket prefix, plus SSM for keyless shell access.
@@ -272,27 +233,9 @@ resource "aws_iam_instance_profile" "desktop" {
 # SSH key pair. Only used while the instance role is unavailable - with SSM
 # there is no reason to open port 22 at all.
 #
-# Only the PUBLIC key is read. The private half stays on the workstation and
-# never enters Terraform state.
+# The key pair and its ingress rule are shared across every session now and
+# live in terraform/network - see data.terraform_remote_state.network above.
 # ---------------------------------------------------------------------------
-
-resource "aws_key_pair" "desktop" {
-  count = var.enable_ssh ? 1 : 0
-
-  key_name   = "${local.name}-key"
-  public_key = trimspace(file("${path.module}/${var.ssh_public_key_path}"))
-}
-
-resource "aws_vpc_security_group_ingress_rule" "ssh" {
-  count = var.enable_ssh ? 1 : 0
-
-  security_group_id = aws_security_group.desktop.id
-  description       = "Temporary: debugging access while SSM is unavailable. Key-only auth."
-  cidr_ipv4         = "0.0.0.0/0"
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
-}
 
 # ---------------------------------------------------------------------------
 # Instance
@@ -314,12 +257,15 @@ data "aws_ami" "ubuntu" {
 }
 
 resource "aws_instance" "desktop" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.desktop.id]
-  iam_instance_profile   = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : null
-  key_name               = var.enable_ssh ? aws_key_pair.desktop[0].key_name : null
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  subnet_id     = data.terraform_remote_state.network.outputs.subnet_id
+  vpc_security_group_ids = [
+    data.terraform_remote_state.network.outputs.security_group_id,
+    aws_security_group.session_access.id,
+  ]
+  iam_instance_profile = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : null
+  key_name             = var.enable_ssh ? data.terraform_remote_state.network.outputs.key_name : null
 
   user_data_replace_on_change = true
 
@@ -384,7 +330,7 @@ resource "aws_instance" "desktop" {
     var.username != "" ? {
       Owner      = var.username
       OwnerEmail = var.owner_email
-      Role       = "guest-desktop"
+      Role       = var.is_guest ? "guest-desktop" : "user-desktop"
     } : {},
   )
 }

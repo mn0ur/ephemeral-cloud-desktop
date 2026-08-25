@@ -20,7 +20,8 @@ export default async function handler(req, res) {
   // leave a desktop nobody can destroy from the panel.
   const email = prior.email || req.body?.owner_email || null;
 
-  const startedAt = Date.now() / 1000;
+  const launchedAt = Number(req.body?.launched_at);
+  const startedAt = Number.isFinite(launchedAt) && launchedAt > 0 ? launchedAt : Date.now() / 1000;
   const isGuest = Boolean(prior.is_guest);
   await putSession(username, {
     status: "ready", // the page polls /healthz before calling it active

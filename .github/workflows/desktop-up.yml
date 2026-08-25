@@ -178,6 +178,10 @@ jobs:
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)
+          INSTANCE_ID=$(terraform -chdir=terraform output -raw instance_id)
+          LAUNCHED_AT=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].LaunchTime' --output text | \
+            xargs -I{} date -u -d {} +%s)
           if [ -z "$HUB_CALLBACK_SECRET" ]; then
             echo "::error::HUB_CALLBACK_SECRET is not set - the guest has no way to learn their URL or password. Add it under Settings > Secrets and variables > Actions."
             exit 1
@@ -193,7 +197,8 @@ jobs:
             --arg url "$URL" \
             --arg password "$PASSWORD" \
             --arg owner_email "${{ inputs.owner_email }}" \
-            '{username:$username, url:$url, password:$password, owner_email:$owner_email}')
+            --arg launched_at "$LAUNCHED_AT" \
+            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber)}')
           curl -fsS -X POST "https://desktop.mnour.dev/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \

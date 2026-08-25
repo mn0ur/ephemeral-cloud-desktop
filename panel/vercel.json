@@ -5,16 +5,12 @@
       "maxDuration": 10
     }
   },
-  "rewrites": [
+  "redirects": [
     {
       "source": "/",
       "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
-      "destination": "/admin.html"
-    },
-    {
-      "source": "/app.js",
-      "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
-      "destination": "/admin.js"
+      "destination": "/admin.html",
+      "permanent": false
     }
   ]
 }

@@ -24,9 +24,13 @@ disappears along with the instance.
    | `GH_TOKEN` | fine-grained PAT, `Actions: read and write` on this repo only |
    | `GH_REPO` | `mn0ur/ephemeral-cloud-desktop` |
    | `GOOGLE_CLIENT_ID` | the OAuth client ID (already authorises `desktop.mnour.dev`) |
-   | `ADMIN_GOOGLE_SUB` | the owner's Google `sub` - grants the admin view |
    | `SESSION_SECRET` | any long random string; signs session cookies |
    | `HUB_CALLBACK_SECRET` | must MATCH the GitHub secret of the same name |
+
+   No env var grants admin access any more. A signed-in Google account's
+   email is checked against an `admins` Redis set instead, seeded on first
+   read with `mnuowr@gmail.com`. Admins are added or removed from
+   `admin.desktop.mnour.dev`, not from Vercel's dashboard.
 
 3. **Deploy**, then point `desktop.mnour.dev` at Vercel. Do this last: the
    hostname is live, and the GitHub workflows POST their callbacks to it.

@@ -129,16 +129,16 @@ resource "aws_vpc_security_group_ingress_rule" "https_open" {
   count = local.access_enabled ? 0 : 1
 
   security_group_id = aws_security_group.session_access.id
-  cidr_ipv4          = "0.0.0.0/0"
-  from_port          = 443
-  to_port             = 443
-  ip_protocol        = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
 }
 
 resource "aws_vpc_security_group_egress_rule" "session_access_all" {
   security_group_id = aws_security_group.session_access.id
-  cidr_ipv4          = "0.0.0.0/0"
-  ip_protocol        = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
@@ -257,15 +257,15 @@ data "aws_ami" "ubuntu" {
 }
 
 resource "aws_instance" "desktop" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  subnet_id              = data.terraform_remote_state.network.outputs.subnet_id
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  subnet_id     = data.terraform_remote_state.network.outputs.subnet_id
   vpc_security_group_ids = [
     data.terraform_remote_state.network.outputs.security_group_id,
     aws_security_group.session_access.id,
   ]
-  iam_instance_profile   = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : null
-  key_name               = var.enable_ssh ? data.terraform_remote_state.network.outputs.key_name : null
+  iam_instance_profile = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : null
+  key_name             = var.enable_ssh ? data.terraform_remote_state.network.outputs.key_name : null
 
   user_data_replace_on_change = true
 

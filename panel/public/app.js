@@ -125,18 +125,6 @@ async function go(action) {
   } catch (e) { busy = false; pendingAction = null; $("err").textContent = e.message; }
 }
 
-async function adminDestroy(username) {
-  if (!confirm(`Destroy ${username}'s desktop?`)) return;
-  $("err").textContent = "";
-  try {
-    const r = await fetch("/api/dispatch", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "destroy", username }),
-    });
-    if (!r.ok) $("err").textContent = (await r.json()).error || await r.text();
-  } catch (e) { $("err").textContent = e.message; }
-}
-
 async function wipeData() {
   // Two steps, because this is irreversible with no snapshot behind it and a
   // single click-through is too cheap for permanently deleting someone's files.

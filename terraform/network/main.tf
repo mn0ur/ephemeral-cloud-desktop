@@ -6,7 +6,7 @@ resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "ephemeral-desktop-network", Project = "ephemeral-desktop" }
+  tags                 = { Name = "ephemeral-desktop-network", Project = "ephemeral-desktop" }
 }
 
 resource "aws_internet_gateway" "main" {
@@ -45,10 +45,10 @@ resource "aws_security_group" "desktop" {
 
 resource "aws_vpc_security_group_ingress_rule" "http" {
   security_group_id = aws_security_group.desktop.id
-  cidr_ipv4          = "0.0.0.0/0"
-  from_port          = 80
-  to_port             = 80
-  ip_protocol        = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 80
+  to_port           = 80
+  ip_protocol       = "tcp"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ssh" {
@@ -56,16 +56,16 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
 
   security_group_id = aws_security_group.desktop.id
   description       = "Debugging access while SSM is unavailable. Key-only auth."
-  cidr_ipv4          = "0.0.0.0/0"
-  from_port          = 22
-  to_port             = 22
-  ip_protocol        = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
 }
 
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.desktop.id
-  cidr_ipv4          = "0.0.0.0/0"
-  ip_protocol        = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
 }
 
 resource "aws_key_pair" "desktop" {

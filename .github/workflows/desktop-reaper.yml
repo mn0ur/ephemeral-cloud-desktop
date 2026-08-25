@@ -79,6 +79,7 @@ jobs:
 
           echo "$ROWS" | while IFS=$'\t' read -r USERNAME LAUNCH_TIME; do
             [ -z "$USERNAME" ] && continue
+            [ "$USERNAME" = "None" ] && continue
             LAUNCH_S=$(date -u -d "$LAUNCH_TIME" +%s)
             AGE_S=$((NOW - LAUNCH_S))
 

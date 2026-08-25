@@ -70,13 +70,42 @@ jobs:
             --filters "Name=default-for-az,Values=true" \
             --query 'Subnets[0].SubnetId' --output text)
 
+          # Bake everything a boot would otherwise fetch from the network. Keep
+          # this list a SUPERSET of what user-data.sh.tpl installs: an extra
+          # package here only costs image size, whereas a missing one just
+          # sends that boot back to the network for it.
+          #
+          # The Caddy binary is the important one. user-data needs Caddy WITH
+          # the caddy-dns/cloudflare module, and the only source for that is a
+          # server-side BUILD request to caddyserver.com - paid on every boot,
+          # and the largest single term left after the image was baked. It is
+          # identical every time, so it belongs here. user-data verifies the
+          # module is really present (caddy list-modules) before trusting it,
+          # so a bad or stale binary falls back to downloading rather than
+          # failing later on a DNS challenge.
           cat > bake-user-data.sh <<'EOF'
           #!/bin/bash
           set -euo pipefail
           apt-get update -y
+          apt-get install -y ca-certificates curl gnupg jq debian-keyring debian-archive-keyring apt-transport-https
           apt-get install -y --no-install-recommends docker.io
           systemctl enable --now docker
           docker pull "$IMAGE_PLACEHOLDER"
+
+          case "$(uname -m)" in
+            aarch64) CADDY_ARCH="arm64" ;;
+            x86_64)  CADDY_ARCH="amd64" ;;
+            *) echo "FATAL: unrecognised architecture $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$CADDY_ARCH&p=github.com/caddy-dns/cloudflare" \
+            -o /usr/bin/caddy
+          chmod 755 /usr/bin/caddy
+          # Fail the bake rather than ship an AMI whose Caddy is unusable -
+          # a boot would silently fall back to downloading and the whole
+          # point of baking it would be lost with no signal.
+          /usr/bin/caddy version
+          /usr/bin/caddy list-modules | grep -q '^dns.providers.cloudflare$'
+
           touch /home/ubuntu/bake-complete
           EOF
           sed -i "s|\$IMAGE_PLACEHOLDER|$IMAGE|" bake-user-data.sh

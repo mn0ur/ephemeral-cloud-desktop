@@ -68,13 +68,31 @@ if [ -n "$CF_DNS_TOKEN" ]; then
     x86_64)  CADDY_ARCH="amd64" ;;
     *) echo "FATAL: unrecognised architecture $(uname -m) for the Caddy build"; exit 1 ;;
   esac
-  echo "fetching Caddy with the Cloudflare DNS module ($CADDY_ARCH)"
-  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$CADDY_ARCH&p=github.com/caddy-dns/cloudflare" \
-    -o /usr/bin/caddy
-  chmod 755 /usr/bin/caddy
-  if ! /usr/bin/caddy version >/dev/null 2>&1; then
-    echo "FATAL: downloaded caddy binary will not execute on this architecture."
-    exit 1
+  # Skip the download when the AMI already carries a Caddy that both RUNS here
+  # and actually has the Cloudflare DNS module compiled in. That download is a
+  # server-side BUILD request to caddyserver.com, not a static file fetch, and
+  # it was being paid on every single boot - measured as the largest remaining
+  # term once the image pull was baked in (baking the image alone moved
+  # boot-to-ready only 383s -> 374s, which is what pointed here).
+  #
+  # Both halves of the check matter. `caddy version` alone would accept the
+  # stock apt binary, which fetches fine and then fails at runtime the moment
+  # a Cloudflare DNS challenge is attempted - the same class of late failure
+  # as the amd64-binary-on-Graviton case above. list-modules is what proves
+  # the module is really there.
+  if [ -x /usr/bin/caddy ] \
+     && /usr/bin/caddy version >/dev/null 2>&1 \
+     && /usr/bin/caddy list-modules 2>/dev/null | grep -q '^dns.providers.cloudflare$'; then
+    echo "using the Caddy baked into the AMI (Cloudflare DNS module present) - skipping the build request"
+  else
+    echo "fetching Caddy with the Cloudflare DNS module ($CADDY_ARCH)"
+    curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$CADDY_ARCH&p=github.com/caddy-dns/cloudflare" \
+      -o /usr/bin/caddy
+    chmod 755 /usr/bin/caddy
+    if ! /usr/bin/caddy version >/dev/null 2>&1; then
+      echo "FATAL: downloaded caddy binary will not execute on this architecture."
+      exit 1
+    fi
   fi
   id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
   mkdir -p /etc/caddy /var/lib/caddy

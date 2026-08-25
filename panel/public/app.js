@@ -68,8 +68,11 @@ function renderMine(s) {
         <div class="sub">You have saved files from a previous session. They are restored on your next start.</div>
         <div class="row"><button id="wipe" class="stop">Delete my saved data</button></div>
       </div>` : "";
+    const persistLabel = session.can_persist
+      ? `<label><input type="checkbox" id="persist"> Keep my files after destroy</label>`
+      : "";
     box.innerHTML = `
-      <label><input type="checkbox" id="persist"> Keep my files after destroy</label>
+      ${persistLabel}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
       ${dataBlock}`;
     $("start").onclick = () => go("start");
@@ -82,6 +85,10 @@ function renderMine(s) {
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * (s.hourly_usd || 0.0529)).toFixed(2)} this session</span>`;
+  }
+  if (mine.expires_at) {
+    const left = mine.expires_at - Date.now() / 1000;
+    html += ` <span class="sub">&middot; ${left > 0 ? fmtDur(left) + " left" : "ending&hellip;"}</span>`;
   }
   html += "</div>";
 
@@ -101,56 +108,6 @@ function renderMine(s) {
   if (!running) html += stepsHtml(s.progress);
   box.innerHTML = html;
   $("destroy").onclick = () => go("destroy");
-}
-
-function renderAdmin(s) {
-  const show = Boolean(session?.is_admin);
-  $("admin-card").style.display = show ? "block" : "none";
-  $("history-card").style.display = show ? "block" : "none";
-  if (!show) return;
-
-  // The admin's own session is excluded - it already has a full card above, and
-  // listing it again produced two identical Destroy buttons with no way to tell
-  // which did what.
-  const rows = Object.entries(s.sessions || {}).filter(([u]) => u !== session.user_id);
-  const host = $("admin-sessions");
-  host.innerHTML = rows.length ? "" : '<div class="sub">Nobody else running right now.</div>';
-  for (const [uname, sess] of rows) {
-    const row = document.createElement("div");
-    row.className = "sess-row";
-    row.innerHTML = `<div><strong>${esc(uname)}</strong><div class="who">${esc(sess.email || "")} &middot; ${esc(sess.status)}</div></div>`;
-    if (["active", "ready", "pending"].includes(sess.status)) {
-      const b = document.createElement("button");
-      b.className = "stop"; b.textContent = "Destroy";
-      b.onclick = () => adminDestroy(uname);
-      row.appendChild(b);
-    }
-    host.appendChild(row);
-  }
-  if (typeof s.active_count === "number" && typeof s.max_concurrent === "number") {
-    const n = document.createElement("div");
-    n.className = "sub"; n.style.marginTop = ".6rem";
-    n.textContent = `${s.active_count} / ${s.max_concurrent} concurrent`;
-    host.appendChild(n);
-  }
-  loadHistory();
-}
-
-async function loadHistory() {
-  try {
-    const r = await fetch("/api/history", { cache: "no-store" });
-    if (!r.ok) return;
-    const { events } = await r.json();
-    $("history").innerHTML = !events?.length
-      ? '<div class="sub">Nothing recorded yet.</div>'
-      : `<table><thead><tr><th>when</th><th>event</th><th>user</th><th>email</th><th>duration</th></tr></thead><tbody>` +
-        events.slice(0, 40).map((e) => `<tr>
-          <td>${esc(new Date(e.ts * 1000).toLocaleString())}</td>
-          <td>${esc(e.event)}</td><td>${esc(e.username || "")}</td>
-          <td>${esc(e.email || "")}</td>
-          <td>${e.duration_s ? esc(fmtDur(e.duration_s)) : ""}</td></tr>`).join("") +
-        "</tbody></table>";
-  } catch { /* history is informational - never break the page over it */ }
 }
 
 async function go(action) {
@@ -247,7 +204,6 @@ async function poll() {
     if (busy && pendingAction === "destroy" && !s.my_session) { busy = false; pendingAction = null; }
 
     renderMine(s);
-    renderAdmin(s);
   } catch (e) {
     $("err").textContent = "status unreachable: " + e.message;
   }

@@ -64,9 +64,20 @@ variable "use_spot" {
 }
 
 variable "root_volume_gb" {
-  description = "Root disk. The XFCE desktop image plus Docker needs well over the 8GB default."
+  description = "Root disk for a CPU session. The XFCE desktop image plus Docker needs well over the 8GB default."
   type        = number
   default     = 30
+}
+
+variable "root_volume_gb_gpu" {
+  description = <<-EOT
+    Root disk for a GPU session. Must be >= the snapshot size baked by
+    bake-ami.yml's gpu=true path (40GB, for the CUDA driver stack) - AWS
+    rejects a root volume smaller than its own AMI's snapshot outright, so
+    getting this wrong fails every GPU launch, not just a slow one.
+  EOT
+  type        = number
+  default     = 40
 }
 
 variable "hostname" {
@@ -159,14 +170,13 @@ variable "gpu" {
 
 variable "instance_type_gpu" {
   description = <<-EOT
-    Used when gpu = true. g5.xlarge (A10G, 4 vCPU) is the cheapest
-    NVENC-capable size available in me-central-1, offered in AZs a and b.
-
-    me-central-1 has no g4dn family at all - that is why this is g5 and not
-    the cheaper g4dn.xlarge that ap-south-1 offers. The GPU premium is the
-    real cost of being in-region: ~$0.505/hr here against ~$0.191/hr in
-    Mumbai. CPU sessions pay only ~$0.027/hr more, which is why the region
-    move is clearly worth it for CPU and a genuine trade-off for GPU.
+    Used when gpu = true. g4dn.xlarge (T4, 4 vCPU) is the cheapest
+    NVENC-capable size that exists on AWS, and ap-south-1 is one of the
+    regions that offers it - unlike me-central-1, which has no g4dn family
+    at all and would need the pricier g5.xlarge (A10G) instead: ~$0.505/hr
+    there against ~$0.191/hr spot here. That gap, on top of the smaller CPU
+    gap, is why Mumbai stayed the answer even though me-central-1 measured
+    lower latency - GPU is the larger cost lever by far.
   EOT
   type        = string
   default     = "g4dn.xlarge"

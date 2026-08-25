@@ -15,7 +15,7 @@ export default async function handler(req, res) {
   // The username is NEVER taken from the request body for the caller's own
   // actions - always from their verified session, so nobody can start or
   // destroy a desktop under someone else's name.
-  const session = sessionFromRequest(req);
+  const session = await sessionFromRequest(req);
   if (!session) return res.status(401).json({ error: "sign in first" });
   const me = session.user_id;
 

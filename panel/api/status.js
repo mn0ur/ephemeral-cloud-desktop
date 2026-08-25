@@ -22,7 +22,7 @@ export default async function handler(req, res) {
     });
   }
 
-  const session = sessionFromRequest(req);
+  const session = await sessionFromRequest(req);
   let sessions = await loadSessions();
 
   if (session) {

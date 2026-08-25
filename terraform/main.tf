@@ -115,10 +115,36 @@ data "aws_ebs_volume" "data" {
 # list, so they follow Cloudflare's published set instead of going stale.
 data "cloudflare_ip_ranges" "cloudflare" {}
 
+# Session-scoped, unlike the shared network stack's SG: Access mode is a
+# per-session setting, and a shared SG can't hold one session's "restrict to
+# Cloudflare only" state without leaking it onto every concurrent session
+# using the same SG. This one is created and destroyed with the instance.
+resource "aws_security_group" "session_access" {
+  name        = "${local.name}-access"
+  description = "Per-session HTTPS ingress: open when Access mode is off, Cloudflare-only when it's on."
+  vpc_id      = data.terraform_remote_state.network.outputs.vpc_id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "https_open" {
+  count = local.access_enabled ? 0 : 1
+
+  security_group_id = aws_security_group.session_access.id
+  cidr_ipv4          = "0.0.0.0/0"
+  from_port          = 443
+  to_port             = 443
+  ip_protocol        = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "session_access_all" {
+  security_group_id = aws_security_group.session_access.id
+  cidr_ipv4          = "0.0.0.0/0"
+  ip_protocol        = "-1"
+}
+
 resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
   for_each = local.access_enabled ? toset(data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks) : toset([])
 
-  security_group_id = data.terraform_remote_state.network.outputs.security_group_id
+  security_group_id = aws_security_group.session_access.id
   description       = "webtop UI via Caddy - Cloudflare edge only (Access enforced there)"
   cidr_ipv4         = each.value
   from_port         = 443
@@ -234,7 +260,10 @@ resource "aws_instance" "desktop" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   subnet_id              = data.terraform_remote_state.network.outputs.subnet_id
-  vpc_security_group_ids = [data.terraform_remote_state.network.outputs.security_group_id]
+  vpc_security_group_ids = [
+    data.terraform_remote_state.network.outputs.security_group_id,
+    aws_security_group.session_access.id,
+  ]
   iam_instance_profile   = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : null
   key_name               = var.enable_ssh ? data.terraform_remote_state.network.outputs.key_name : null
 

@@ -134,8 +134,13 @@ data "cloudflare_ip_ranges" "cloudflare" {}
 # Cloudflare only" state without leaking it onto every concurrent session
 # using the same SG. This one is created and destroyed with the instance.
 resource "aws_security_group" "session_access" {
-  name        = "${local.name}-access"
-  description = "Per-session HTTPS ingress: open when Access mode is off, Cloudflare-only when it's on."
+  name = "${local.name}-access"
+  # NO APOSTROPHES. AWS restricts security group descriptions to
+  # a-zA-Z0-9. _-:/()#,@[]+=&;{}!$* - an apostrophe is rejected with
+  # "Invalid security group description", and it fails at CreateSecurityGroup
+  # time, so terraform validate/plan both pass and only a real apply catches
+  # it. Cost the first live start test after the network split.
+  description = "Per-session HTTPS ingress: open when Access mode is off, Cloudflare-only when on."
   vpc_id      = data.terraform_remote_state.network.outputs.vpc_id
 }
 

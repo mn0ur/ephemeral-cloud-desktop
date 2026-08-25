@@ -48,6 +48,10 @@ on:
         description: "Gate this desktop behind Cloudflare Access (owner's Google account only). Requires the hostname to be PROXIED, which puts Selkies' WebSocket through Cloudflare's proxy - verify the stream still works before relying on it."
         type: boolean
         default: false
+      is_guest:
+        description: "True if this session is a guest (no persist option, subject to the reaper's time limit). Set by the panel; false for anything dispatched by hand."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -154,6 +158,7 @@ jobs:
           TF_VAR_owner_email: ${{ inputs.owner_email }}
           TF_VAR_cloudflare_dns_api_token: ${{ inputs.guest_username != '' && secrets.CLOUDFLARE_API_TOKEN || '' }}
           TF_VAR_enable_access: ${{ inputs.enable_access }}
+          TF_VAR_is_guest: ${{ inputs.is_guest }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then

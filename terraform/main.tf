@@ -301,7 +301,7 @@ resource "aws_instance" "desktop" {
     var.username != "" ? {
       Owner      = var.username
       OwnerEmail = var.owner_email
-      Role       = "guest-desktop"
+      Role       = var.is_guest ? "guest-desktop" : "user-desktop"
     } : {},
   )
 }

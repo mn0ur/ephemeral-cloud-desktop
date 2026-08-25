@@ -59,6 +59,7 @@ export default async function handler(req, res) {
         guest_username: me,
         owner_email: session.email,
         persist: persist ? "true" : "false",
+        is_guest: session.can_persist ? "false" : "true",
       });
     } catch (e) {
       // Roll back on ANY dispatch failure - a GitHub outage, a revoked token or

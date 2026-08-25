@@ -272,6 +272,12 @@ variable "cloudflare_account_id" {
   default     = "6128d1607a4bc882e8ccb1352a14702c"
 }
 
+variable "is_guest" {
+  description = "True only for an actual guest session - controls the Role=guest-desktop tag the reaper selects on. False for permanent users, other admins, and the owner's own desktop, even though they may also have a non-empty username."
+  type        = bool
+  default     = false
+}
+
 variable "cloudflare_dns_api_token" {
   description = <<-EOT
     Lets Caddy prove domain ownership via a DNS-01 TXT record instead of the

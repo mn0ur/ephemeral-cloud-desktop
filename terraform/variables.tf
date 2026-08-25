@@ -21,7 +21,7 @@ variable "region" {
     resource region are independent.
   EOT
   type        = string
-  default     = "me-central-1"
+  default     = "ap-south-1"
 }
 
 variable "az_suffix" {
@@ -42,7 +42,7 @@ variable "az_suffix" {
     match wherever guest volumes are created (see desktop-up.yml).
   EOT
   type        = string
-  default     = "a"
+  default     = "c"
 }
 
 variable "project" {
@@ -169,7 +169,7 @@ variable "instance_type_gpu" {
     move is clearly worth it for CPU and a genuine trade-off for GPU.
   EOT
   type        = string
-  default     = "g5.xlarge"
+  default     = "g4dn.xlarge"
 }
 
 variable "encoder" {

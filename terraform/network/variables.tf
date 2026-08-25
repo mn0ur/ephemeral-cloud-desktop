@@ -1,6 +1,6 @@
 variable "region" {
   type    = string
-  default = "me-central-1"
+  default = "ap-south-1"
 }
 
 variable "az_suffix" {
@@ -8,7 +8,7 @@ variable "az_suffix" {
   # me-central-1a: the ONLY AZ in this region carrying both the cheapest
   # c7i.xlarge spot price AND the g5 GPU family, so CPU and GPU sessions can
   # share one AZ. me-central-1c matches on CPU price but has no GPU at all.
-  default = "a"
+  default = "c"
 }
 
 variable "vpc_cidr" {

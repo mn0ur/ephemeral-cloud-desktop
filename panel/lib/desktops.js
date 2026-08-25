@@ -10,7 +10,7 @@ export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
 // the figure shown to a GPU user is currently ~6x low - the panel has no
 // per-session notion of instance type yet. Worth wiring through before GPU
 // sessions are offered to anyone but the operator.
-export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0878);
+export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0529);
 export const PENDING_TIMEOUT_S = 10 * 60;
 
 export function desktopUrl(username) {

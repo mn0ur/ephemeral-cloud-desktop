@@ -40,11 +40,15 @@ export default async function handler(req, res) {
       return res.status(503).json({ error: "all desktops are busy right now - try again shortly" });
     }
 
-    const persist = Boolean(req.body?.persist);
+    // A guest cannot forge "persist: true" in the request body - the
+    // client only shows the checkbox when can_persist is true, but the
+    // server is the actual enforcement point.
+    const persist = session.can_persist && Boolean(req.body?.persist);
     await putSession(me, {
       status: "pending",
       email: session.email,
       dispatched_at: Date.now() / 1000,
+      is_guest: !session.can_persist,
     });
     await logEvent("login_start", { username: me, email: session.email, persist });
 

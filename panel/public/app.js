@@ -17,6 +17,9 @@ let session = null;
 let busy = false;
 let pendingAction = null;
 let googleRendered = false;
+// Set when a desktop became ready but the browser refused to open the tab for
+// us, so the Running card can say so instead of the user seeing nothing happen.
+let autoOpenBlocked = false;
 
 function fmtDur(sec) {
   const m = Math.floor(sec / 60), h = Math.floor(m / 60);
@@ -103,6 +106,12 @@ function renderMine(s) {
       <div class="sub" style="margin-top:.35rem">Same username every time. The password changes each start.</div>
     </div>`;
 
+  if (running && autoOpenBlocked) {
+    html += `<div class="steps" style="border-color:var(--green-dim)">
+        <div><span class="dot up"></span> <strong>Your desktop is ready.</strong></div>
+        <div class="sub">The browser blocked the tab we tried to open for you &mdash; use the button below. Keep this page open: the desktop asks for the username and password shown here.</div>
+      </div>`;
+  }
   if (mine.url) html += `<a class="open" href="${esc(mine.url)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
   html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
   if (!running) html += stepsHtml(s.progress);
@@ -187,7 +196,13 @@ async function poll() {
     // visible, whichever tab the user actually looks at.
     if (busy && pendingAction === "start" && s.my_session?.status === "active") {
       busy = false; pendingAction = null;
-      window.open(s.my_session.url, "_blank", "noopener");
+      // window.open() here runs from a TIMER, not a click, so it is not a user
+      // gesture - and popup blockers refuse those, returning null, silently.
+      // The desktop was ready and the page appeared to do nothing at all.
+      // Capture the refusal so the card below can show a real call to action.
+      let opened = null;
+      try { opened = window.open(s.my_session.url, "_blank", "noopener"); } catch { /* blocked */ }
+      autoOpenBlocked = !opened;
     }
     if (busy && pendingAction === "destroy" && !s.my_session) { busy = false; pendingAction = null; }
 
@@ -206,3 +221,20 @@ $("g-signout").onclick = () => {
 
 poll();
 setInterval(poll, 5000);
+
+// Coming back to this tab must be equivalent to reloading it.
+//
+// A desktop takes minutes to become ready, so nobody sits and watches the
+// page - they switch away and come back. Mobile browsers THROTTLE, and often
+// entirely FREEZE, setInterval in a backgrounded tab, so the 5s poll that
+// would have noticed "ready" never ran. The page was still showing
+// "Starting..." with no username or password, and only a manual refresh fixed
+// it - which is exactly the reported symptom.
+//
+// Both events, deliberately: visibilitychange covers tab switches and locking
+// the phone, focus covers window-level switches that fire no visibility
+// change. poll() is idempotent, so a doubled call is harmless.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) poll();
+});
+window.addEventListener("focus", () => poll());

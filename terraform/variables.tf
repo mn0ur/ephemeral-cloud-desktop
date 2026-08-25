@@ -145,9 +145,25 @@ variable "encoder" {
 }
 
 variable "framerate" {
-  description = "Target framerate. Selkies accepts 8-120."
+  description = <<-EOT
+    Target framerate. Selkies accepts 8-120.
+
+    30, not 60. With encoder=x264enc every frame is encoded in SOFTWARE, on
+    the same 4 vCPUs that are also running KDE - so 60fps asks for twice the
+    encode work on a machine that has no spare capacity to give. The frames
+    queue, and a growing encoder queue is felt as input lag, which is the
+    worst way to spend CPU on an interactive desktop.
+
+    Measured round-trip to ap-south-1 from a client in UTC+3 is ~132ms
+    already; adding encoder queueing on top of that is what makes it feel
+    sluggish rather than merely remote. Halving the frame rate is the one
+    lever that costs nothing.
+
+    Raise it again only alongside a GPU instance and encoder=nvh264enc, where
+    encoding is offloaded and 60fps is nearly free.
+  EOT
   type        = number
-  default     = 60
+  default     = 30
 }
 
 variable "timezone" {

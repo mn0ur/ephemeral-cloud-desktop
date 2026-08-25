@@ -2,10 +2,15 @@
 
 export const DESKTOP_DOMAIN = process.env.DESKTOP_DOMAIN || "desktop.mnour.dev";
 export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
-// c7i.xlarge spot in ap-south-1c, measured 2026-08-10. Keep in step with
+// c7i.xlarge spot in me-central-1a, measured 2026-08-25. Keep in step with
 // terraform/variables.tf: a region move that forgets this line makes the
-// panel lie about money. eu-central-1 was 0.104.
-export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0529);
+// panel lie about money. History: eu-central-1 0.104, ap-south-1c 0.0529.
+//
+// This is the CPU price. A gpu=true session runs g5.xlarge at ~0.505/hr, so
+// the figure shown to a GPU user is currently ~6x low - the panel has no
+// per-session notion of instance type yet. Worth wiring through before GPU
+// sessions are offered to anyone but the operator.
+export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0878);
 export const PENDING_TIMEOUT_S = 10 * 60;
 
 export function desktopUrl(username) {

@@ -42,8 +42,8 @@ jobs:
     # against $0.0651 in ap-south-1a - the zone a hardcoded "a" would have
     # picked - and 47% under eu-central-1.
     env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
+      AWS_REGION: me-central-1
+      AWS_AZ: me-central-1a
     steps:
       - name: Check confirmation
         run: |

@@ -6,6 +6,10 @@ name: Bake Desktop AMI
 on:
   workflow_dispatch:
     inputs:
+      region:
+        description: "Region to bake into. AMIs are region-specific, so a region move needs its own bake - this input is what lets the new region be prepared while the old one keeps serving."
+        type: string
+        default: "me-central-1"
       gpu:
         description: "Bake the GPU variant: NVIDIA driver + container toolkit + DRM kernel args, built ON a g4dn so the driver is verified against a real T4. Produces Variant=gpu; leave false for the CPU AMI."
         type: boolean
@@ -15,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ap-south-1
+  AWS_REGION: ${{ inputs.region }}
   # IMAGE is deliberately NOT hardcoded here. It was, and it drifted: this
   # workflow baked ubuntu-kde while terraform/variables.tf's var.image
   # actually launches debian-kde. The bake "succeeded", the AMI looked

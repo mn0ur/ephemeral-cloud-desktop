@@ -21,7 +21,7 @@ variable "region" {
     resource region are independent.
   EOT
   type        = string
-  default     = "ap-south-1"
+  default     = "me-central-1"
 }
 
 variable "az_suffix" {
@@ -42,7 +42,7 @@ variable "az_suffix" {
     match wherever guest volumes are created (see desktop-up.yml).
   EOT
   type        = string
-  default     = "c"
+  default     = "a"
 }
 
 variable "project" {
@@ -158,9 +158,18 @@ variable "gpu" {
 }
 
 variable "instance_type_gpu" {
-  description = "Used when gpu = true. g4dn.xlarge is the cheapest NVENC-capable size (T4, 4 vCPU) and is available in ap-south-1c; me-central-1 has no g4dn at all, which is why the region was not moved."
+  description = <<-EOT
+    Used when gpu = true. g5.xlarge (A10G, 4 vCPU) is the cheapest
+    NVENC-capable size available in me-central-1, offered in AZs a and b.
+
+    me-central-1 has no g4dn family at all - that is why this is g5 and not
+    the cheaper g4dn.xlarge that ap-south-1 offers. The GPU premium is the
+    real cost of being in-region: ~$0.505/hr here against ~$0.191/hr in
+    Mumbai. CPU sessions pay only ~$0.027/hr more, which is why the region
+    move is clearly worth it for CPU and a genuine trade-off for GPU.
+  EOT
   type        = string
-  default     = "g4dn.xlarge"
+  default     = "g5.xlarge"
 }
 
 variable "encoder" {

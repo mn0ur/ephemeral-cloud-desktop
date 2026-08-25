@@ -92,8 +92,8 @@ jobs:
     # download entirely, and the lockfile is exactly the right key: it changes
     # if and only if a provider version changes.
     env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
+      AWS_REGION: me-central-1
+      AWS_AZ: me-central-1a
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
 
     steps:

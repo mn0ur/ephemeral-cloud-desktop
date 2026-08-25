@@ -20,7 +20,7 @@ data "terraform_remote_state" "network" {
 
   config = {
     bucket = "ephemeral-desktop-643902831477-tfstate"
-    key    = "network/terraform.tfstate"
+    key    = "network/${var.region}/terraform.tfstate"
     region = "me-central-1"
   }
 }
@@ -45,8 +45,8 @@ locals {
   # An EBS volume can only attach to an instance in its own availability zone,
   # so this must agree with wherever guest volumes are created - see the
   # AWS_AZ env in desktop-up.yml, which is the single source of truth.
-  # The suffix is a variable rather than a hardcoded "a" because spot pricing
-  # differs by ~23% between zones in ap-south-1, and "a" is the priciest.
+  # A variable, not hardcoded: which AZ is cheapest (and which even offers the
+  # GPU family) differs by region, and this project has now moved twice.
   az = "${var.region}${var.az_suffix}"
 
   # Explicit password when supplied, generated otherwise. Lets a desktop be

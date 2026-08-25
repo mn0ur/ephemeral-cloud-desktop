@@ -1,11 +1,14 @@
 variable "region" {
   type    = string
-  default = "ap-south-1"
+  default = "me-central-1"
 }
 
 variable "az_suffix" {
-  type    = string
-  default = "c" # ap-south-1c: cheapest spot zone for this instance family, measured 2026-08-10.
+  type = string
+  # me-central-1a: the ONLY AZ in this region carrying both the cheapest
+  # c7i.xlarge spot price AND the g5 GPU family, so CPU and GPU sessions can
+  # share one AZ. me-central-1c matches on CPU price but has no GPU at all.
+  default = "a"
 }
 
 variable "vpc_cidr" {

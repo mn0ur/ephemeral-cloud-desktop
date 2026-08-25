@@ -40,8 +40,8 @@ jobs:
     timeout-minutes: 30
 
     env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
+      AWS_REGION: me-central-1
+      AWS_AZ: me-central-1a
     steps:
       - uses: actions/checkout@v4
 

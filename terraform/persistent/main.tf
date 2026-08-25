@@ -55,7 +55,7 @@ variable "region" {
     region the desktop no longer runs in.
   EOT
   type        = string
-  default     = "ap-south-1"
+  default     = "me-central-1"
 }
 
 variable "project" {
@@ -83,7 +83,7 @@ variable "az_suffix" {
     this stack tracked had already been deleted out from under it.
   EOT
   type        = string
-  default     = "c"
+  default     = "a"
 }
 
 locals {

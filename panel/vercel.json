@@ -4,5 +4,17 @@
     "api/**/*.js": {
       "maxDuration": 10
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
+      "destination": "/admin.html"
+    },
+    {
+      "source": "/app.js",
+      "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
+      "destination": "/admin.js"
+    }
+  ]
 }

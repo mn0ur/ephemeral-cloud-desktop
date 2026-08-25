@@ -45,9 +45,17 @@ provider "aws" {
 }
 
 variable "region" {
-  description = "Must match the desktop stack's region - an EBS volume can only attach to an instance in the same AZ."
+  description = <<-EOT
+    Must match the desktop stack's region - an EBS volume can only attach to
+    an instance in the same AZ, so region and az_suffix both have to agree
+    with terraform/network.
+
+    Was left at eu-central-1 when the desktop moved to ap-south-1 on
+    2026-08-10, which is how this stack ended up tracking a volume in a
+    region the desktop no longer runs in.
+  EOT
   type        = string
-  default     = "eu-central-1"
+  default     = "ap-south-1"
 }
 
 variable "project" {
@@ -61,11 +69,27 @@ variable "size_gb" {
   default     = 20
 }
 
+variable "az_suffix" {
+  description = <<-EOT
+    Must match terraform/network's az_suffix. An EBS volume attaches only
+    within its own AZ, so a mismatch here does not fail at apply time - it
+    fails later, when the instance is already up and the attachment is
+    refused.
+
+    This variable exists because the suffix used to be hardcoded "a" while
+    the desktop side moved to "c" (ap-south-1c is materially cheaper for
+    this instance family). The comment below claimed both stacks derived the
+    AZ identically; they did not, and nothing detected it because the volume
+    this stack tracked had already been deleted out from under it.
+  EOT
+  type        = string
+  default     = "c"
+}
+
 locals {
-  # Both stacks derive the AZ the same way so the volume and instance always
-  # land together. Hardcoding "eu-central-1a" would silently break on a
-  # region change.
-  az = "${var.region}a"
+  # Both stacks derive the AZ from region + suffix so the volume and instance
+  # always land together. Hardcoding either half is what broke this before.
+  az = "${var.region}${var.az_suffix}"
 }
 
 resource "aws_ebs_volume" "data" {

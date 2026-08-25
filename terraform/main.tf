@@ -61,6 +61,20 @@ locals {
 # and deliberately NOT managed here - destroying the desktop must never
 # remove it. Only looked up for the owner's own desktop (slot == ""); guests
 # get a separate, per-guest volume below instead.
+#
+# If this lookup fails with "Your query returned no results", the volume does
+# not exist in this region+AZ. That is not a bug in this stack: it means
+# terraform/persistent has never been applied for the CURRENT region/AZ, or
+# its volume was deleted out from under it (both true on 2026-08-25 - the
+# volume it tracked had been deleted, and its region/az_suffix defaults still
+# pointed at eu-central-1a while the desktop had moved to ap-south-1c).
+#
+# Fix by applying the persistent stack with matching values, once:
+#   terraform -chdir=terraform/persistent init
+#   terraform -chdir=terraform/persistent apply
+# Guest and permanent-user sessions never reach this lookup at all - they get
+# their own per-user volume, created by desktop-up.yml in the right AZ - so
+# only the owner's own desk.mnour.dev desktop depends on this.
 data "aws_ebs_volume" "data" {
   count = var.username == "" ? 1 : 0
 

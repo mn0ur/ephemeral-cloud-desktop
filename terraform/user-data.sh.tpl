@@ -31,6 +31,10 @@ ACCESS_ENABLED="${access_enabled}"
 # false -> no volume by design ("don't keep my data"); the root disk is the
 #          correct place to run and everything is meant to vanish.
 PERSIST_ENABLED="${persist_enabled}"
+# true -> this is a GPU instance and encoding runs on NVENC instead of the CPU.
+# The AMI already carries the NVIDIA driver and the container toolkit (see
+# bake-ami.yml); all that is left at boot is handing the GPU to the container.
+GPU_ENABLED="${gpu}"
 PERSIST_ROOT="/mnt/persist"
 CONFIG_DIR="$PERSIST_ROOT/config"
 DOCKER_ROOT="$PERSIST_ROOT/docker"
@@ -386,6 +390,31 @@ else
     AUTH_ENV="-e CUSTOM_USER=${web_user} -e PASSWORD=${web_password}"
   fi
 
+  # Hand the GPU to the container, and point both the render and the encode
+  # node at the SAME device. LinuxServer's docs are explicit that matching
+  # DRINODE and DRI_NODE is what enables Zero Copy - the frame is rendered and
+  # encoded on the card without a round trip through system memory, which is
+  # where both the CPU cost and a chunk of the latency come from. Setting only
+  # one of them silently gives up that path.
+  GPU_ARGS=""
+  if [ "$GPU_ENABLED" = "true" ]; then
+    # Fail loudly rather than fall back to software encoding. A GPU instance
+    # that quietly encodes on the CPU is the worst outcome available: it bills
+    # 3.2x and feels no better, with nothing in the UI to say why.
+    if ! nvidia-smi >/dev/null 2>&1; then
+      echo "FATAL: gpu=true but nvidia-smi does not work - the NVIDIA driver is missing or did not load."
+      echo "The AMI must be a gpu-variant build (bake-ami.yml with gpu=true)."
+      exit 1
+    fi
+    if [ ! -e /dev/dri/renderD128 ]; then
+      echo "FATAL: gpu=true but /dev/dri/renderD128 is absent - DRM did not initialise."
+      echo "Check that nvidia-drm.modeset=1 reached the kernel command line in this AMI."
+      exit 1
+    fi
+    nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+    GPU_ARGS="--gpus all -e DRINODE=/dev/dri/renderD128 -e DRI_NODE=/dev/dri/renderD128"
+  fi
+
   docker run -d \
     --name webtop \
     --restart unless-stopped \
@@ -397,6 +426,7 @@ else
     -e PGID=1000 \
     -e TZ='${timezone}' \
     $AUTH_ENV \
+    $GPU_ARGS \
     -e SELKIES_AUDIO_ENABLED=true \
     -e SELKIES_MICROPHONE_ENABLED=true \
     -e SELKIES_CLIPBOARD_ENABLED=true \

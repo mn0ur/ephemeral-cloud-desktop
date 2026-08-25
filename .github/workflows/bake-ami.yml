@@ -4,7 +4,12 @@ name: Bake Desktop AMI
 # when the desktop image (linuxserver/webtop) or base OS packages change and
 # a fresh boot needs to pick that up.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      gpu:
+        description: "Bake the GPU variant: NVIDIA driver + container toolkit + DRM kernel args, built ON a g4dn so the driver is verified against a real T4. Produces Variant=gpu; leave false for the CPU AMI."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -106,13 +111,67 @@ jobs:
           /usr/bin/caddy version
           /usr/bin/caddy list-modules | grep -q '^dns.providers.cloudflare$'
 
+          if [ "$GPU_PLACEHOLDER" = "true" ]; then
+            # Driver from NVIDIA's own CUDA repo, not Ubuntu's: the docs require
+            # 580 or newer for this image's GPU path and the distro archive lags
+            # well behind that. cuda-drivers is the metapackage that tracks the
+            # current release.
+            curl -fsSL -o /tmp/cuda-keyring.deb \
+              https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+            dpkg -i /tmp/cuda-keyring.deb
+            apt-get update -y
+            DEBIAN_FRONTEND=noninteractive apt-get install -y cuda-drivers
+
+            # nvidia-container-toolkit is what lets `docker run --gpus all`
+            # work at all; without the runtime configured, that flag errors.
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+              | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+              | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+              > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            apt-get update -y
+            apt-get install -y nvidia-container-toolkit
+            nvidia-ctk runtime configure --runtime=docker
+            systemctl restart docker
+
+            # DRM modeset must be on the kernel command line for /dev/dri to
+            # appear, which the Zero Copy encode path needs. It only takes
+            # effect on the NEXT boot - which is every instance launched from
+            # this AMI, so baking the grub change is exactly right even though
+            # this bake instance itself never sees it applied.
+            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia-drm.modeset=1 nvidia_drm.fbdev=1"/' /etc/default/grub
+            update-grub
+
+            # Verify against the real T4 this is baking on. modprobe because a
+            # freshly installed driver is not loaded yet; if nvidia-smi still
+            # fails the driver is genuinely broken and shipping the AMI would
+            # only move the failure to every future boot.
+            modprobe nvidia || true
+            nvidia-smi
+          fi
+
           touch /home/ubuntu/bake-complete
           EOF
           sed -i "s|\$IMAGE_PLACEHOLDER|$IMAGE|" bake-user-data.sh
+          sed -i "s|\$GPU_PLACEHOLDER|${{ inputs.gpu }}|" bake-user-data.sh
+
+          # The GPU variant bakes ON a g4dn so the driver is verified against a
+          # real T4 rather than merely installed. The CUDA driver stack is also
+          # several GB, so the default 8GB root is not enough - 40GB leaves room
+          # for it plus the desktop image.
+          if [ "${{ inputs.gpu }}" = "true" ]; then
+            BAKE_TYPE=g4dn.xlarge
+            ROOT_GB=40
+          else
+            BAKE_TYPE=t3.medium
+            ROOT_GB=16
+          fi
+          echo "baking on $BAKE_TYPE with a ${ROOT_GB}GB root"
 
           INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id "$BASE_AMI" --instance-type t3.medium \
+            --image-id "$BASE_AMI" --instance-type "$BAKE_TYPE" \
             --subnet-id "$SUBNET" --associate-public-ip-address \
+            --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$ROOT_GB,VolumeType=gp3,DeleteOnTermination=true}" \
             --user-data file://bake-user-data.sh \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ami-bake-temp}]' \
             --query 'Instances[0].InstanceId' --output text)
@@ -124,10 +183,12 @@ jobs:
           # No SSM/instance-role on this throwaway box - poll console output
           # for the completion marker instead of anything requiring inbound
           # access. Docker pulling ~2GB comfortably finishes well inside 10
-          # minutes; if it doesn't, something is actually wrong and should
-          # fail loud rather than snapshot a half-pulled image.
+          # minutes, but the GPU variant also installs the multi-GB CUDA driver
+          # stack, so the ceiling here is 20 minutes. If it is still not done,
+          # something is actually wrong and should fail loud rather than
+          # snapshot a half-provisioned image.
           FOUND=0
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             OUT=$(aws ec2 get-console-output --instance-id "$INSTANCE_ID" --output text --query Output || true)
             if echo "$OUT" | grep -q "bake-complete\|cloud-init.*finished"; then
               FOUND=1
@@ -145,10 +206,11 @@ jobs:
         run: |
           set -euo pipefail
           STAMP=$(date -u +%Y%m%d%H%M%S)
+          VARIANT=$([ "${{ inputs.gpu }}" = "true" ] && echo gpu || echo cpu)
           AMI_ID=$(aws ec2 create-image \
             --instance-id "$INSTANCE_ID" \
-            --name "ephemeral-desktop-baked-$STAMP" \
-            --tag-specifications "ResourceType=image,Tags=[{Key=Project,Value=ephemeral-desktop},{Key=BakedAt,Value=$STAMP}]" \
+            --name "ephemeral-desktop-baked-$VARIANT-$STAMP" \
+            --tag-specifications "ResourceType=image,Tags=[{Key=Project,Value=ephemeral-desktop},{Key=BakedAt,Value=$STAMP},{Key=Variant,Value=$VARIANT}]" \
             --query ImageId --output text)
           echo "baked AMI: $AMI_ID - waiting for it to become available"
           aws ec2 wait image-available --image-ids "$AMI_ID"

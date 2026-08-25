@@ -138,10 +138,41 @@ variable "image" {
   default     = "lscr.io/linuxserver/webtop:debian-kde"
 }
 
+variable "gpu" {
+  description = <<-EOT
+    Run on a GPU instance and encode in HARDWARE (NVENC) instead of software.
+
+    This is the real fix for input lag, not a luxury. With x264enc every frame
+    is encoded on the same 4 vCPUs running KDE, so the encoder and the desktop
+    fight for CPU and frames queue - felt directly as lag. NVENC moves encoding
+    onto the T4's dedicated encoder chip: single-digit ms per frame, and the
+    CPU is handed back to the desktop.
+
+    Opt-in rather than the default because it costs ~3.2x/hour ($0.197 vs
+    $0.061 spot for the sizes below) and needs the gpu-variant AMI to exist.
+    Everything switches together - instance type, encoder, AMI variant, and the
+    container's device access - so this single flag is the whole decision.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "instance_type_gpu" {
+  description = "Used when gpu = true. g4dn.xlarge is the cheapest NVENC-capable size (T4, 4 vCPU) and is available in ap-south-1c; me-central-1 has no g4dn at all, which is why the region was not moved."
+  type        = string
+  default     = "g4dn.xlarge"
+}
+
 variable "encoder" {
-  description = "Selkies video encoder. x264enc is software H.264 - correct for a CPU instance. GPU instances can use nvh264enc."
+  description = "Software H.264, for a CPU instance. Ignored when gpu = true, which uses encoder_gpu instead."
   type        = string
   default     = "x264enc"
+}
+
+variable "encoder_gpu" {
+  description = "Hardware H.264 on NVIDIA NVENC. Used when gpu = true."
+  type        = string
+  default     = "nvh264enc"
 }
 
 variable "framerate" {

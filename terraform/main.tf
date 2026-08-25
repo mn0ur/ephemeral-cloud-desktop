@@ -285,6 +285,15 @@ data "aws_ami" "desktop" {
     values = ["ephemeral-desktop"]
   }
 
+  # Variant, not just Project: the gpu AMI carries NVIDIA drivers and a
+  # DRM-enabled kernel command line, and booting it on a c7i (no GPU) - or
+  # booting the cpu AMI on a g4dn and silently getting software encoding
+  # anyway - are both failures that only show up as "it feels slow".
+  filter {
+    name   = "tag:Variant"
+    values = [var.gpu ? "gpu" : "cpu"]
+  }
+
   # A bake that failed partway can leave an AMI behind in a non-usable state;
   # launching from one fails late and confusingly.
   filter {
@@ -295,7 +304,7 @@ data "aws_ami" "desktop" {
 
 resource "aws_instance" "desktop" {
   ami           = data.aws_ami.desktop.id
-  instance_type = var.instance_type
+  instance_type = var.gpu ? var.instance_type_gpu : var.instance_type
   subnet_id     = data.terraform_remote_state.network.outputs.subnet_id
   vpc_security_group_ids = [
     data.terraform_remote_state.network.outputs.security_group_id,
@@ -319,7 +328,8 @@ resource "aws_instance" "desktop" {
     timezone                 = var.timezone
     web_user                 = var.web_user
     web_password             = local.web_password
-    encoder                  = var.encoder
+    encoder                  = var.gpu ? var.encoder_gpu : var.encoder
+    gpu                      = var.gpu ? "true" : "false"
     framerate                = var.framerate
     fresh                    = var.fresh ? "true" : "false"
     cloudflare_dns_api_token = var.cloudflare_dns_api_token

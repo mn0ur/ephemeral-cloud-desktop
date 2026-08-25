@@ -52,6 +52,10 @@ on:
         description: "True if this session is a guest (no persist option, subject to the reaper's time limit). Set by the panel; false for anything dispatched by hand."
         type: boolean
         default: false
+      gpu:
+        description: "Run on a GPU instance with hardware NVENC encoding instead of software x264. Removes encoder load from the CPU, which is the dominant cause of input lag. Costs ~3.2x/hour and requires a gpu-variant AMI."
+        type: boolean
+        default: false
       use_spot:
         description: "Spot is ~4x cheaper but can be unfulfillable - c7i.xlarge in ap-south-1c had no capacity twice on 2026-08-25, and a spot request that is never fulfilled just hangs the apply until the job timeout. Set false to retry the same session on-demand instead of waiting for capacity."
         type: boolean
@@ -172,6 +176,7 @@ jobs:
           TF_VAR_enable_access: ${{ inputs.enable_access }}
           TF_VAR_is_guest: ${{ inputs.is_guest }}
           TF_VAR_use_spot: ${{ inputs.use_spot }}
+          TF_VAR_gpu: ${{ inputs.gpu }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then

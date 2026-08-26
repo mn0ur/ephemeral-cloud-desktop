@@ -1,185 +1,282 @@
 # Ephemeral Cloud Desktop
 
-A full Linux desktop in the browser, provisioned on AWS with Terraform. One
-click up, one click down. Installed software, files and browser sessions
-survive teardown. When it is down it costs about **$1.90/month**.
+A full Linux desktop (KDE Plasma, GPU-capable, audio and clipboard included)
+that boots on AWS in minutes, streams to any browser, and costs **~$1.90/month
+when nobody's using it.** One click to start, one click to destroy — your
+files, apps, and settings survive every teardown.
 
-Live at `desk.mnour.dev`, controlled from `hub.mnour.dev/control`.
+**Live:** [desktop.mnour.dev](https://desktop.mnour.dev) — self-service panel with Google sign-in
+**Admin console:** `admin.desktop.mnour.dev` — tiers, guest limits, live session state
+
+---
 
 ## Why this exists
 
-I wanted a disposable cloud desktop I could actually use — audio, video, real
-applications — without paying for an idle instance. The interesting engineering
-is not the desktop. It is making compute genuinely disposable **while keeping
-state**, and that turned out to be much harder than it looks.
+Cloud desktops are usually priced for people who leave them running. This one
+is priced for people who don't. The interesting engineering was never "run a
+desktop in AWS" — it's making compute genuinely *disposable* (destroyed
+completely between sessions, zero idle cost) while everything that matters
+(files, credentials, installed software) survives that destruction anyway.
+Getting that split right, and keeping it right as the project grew from a
+single manually-started box into a multi-tier self-service product, is what
+this repo actually documents.
 
-## What it actually runs
+## Architecture
 
-    PERSISTENT — never destroyed              EPHEMERAL — destroyed every session
-    ──────────────────────────────            ───────────────────────────────────
-    S3      terraform state                   VPC, subnet, IGW, security group
-    EBS     20GB gp3 volume                   EC2 c7i.xlarge SPOT
-              /config    desktop home         Caddy      TLS termination
-              containerd images + layers      Docker     linuxserver/webtop
-              caddy      TLS certificates                Debian 13 + KDE Plasma 6
-    random_password  credentials                         Selkies streaming engine
+```
+                          ┌─────────────────────────┐
+   Browser ───HTTPS──────▶│  Vercel (serverless)     │
+                          │  desktop.mnour.dev       │
+                          │  admin.desktop.mnour.dev │
+                          │  Google Sign-In auth     │
+                          └────────────┬─────────────┘
+                                       │ workflow_dispatch
+                                       │ (GitHub Actions API)
+                          ┌────────────▼─────────────┐
+                          │   Upstash Redis           │
+                          │   sessions · tiers ·      │
+                          │   config · history         │
+                          └────────────┬─────────────┘
+                                       │
+                          ┌────────────▼─────────────┐
+                          │   GitHub Actions          │
+                          │   START · DOWN · WIPE ·   │
+                          │   REAPER · BAKE-AMI       │
+                          └────────────┬─────────────┘
+                                       │ terraform apply
+                          ┌────────────▼─────────────┐
+                          │   AWS ap-south-1 (Mumbai) │
+                          │   spot c7i.xlarge          │
+                          │   (or g4dn.xlarge + GPU)  │
+                          │   Caddy → webtop → KDE     │
+                          │   Selkies WebRTC streaming │
+                          └───────────────────────────┘
 
-    Cloudflare A record, updated in place — never deleted
+   PERSISTENT (never destroyed)          EPHEMERAL (destroyed every session)
+   ───────────────────────────           ───────────────────────────────────
+   S3        terraform state             VPC, subnet, security group
+   EBS 20GB  /config, desktop home       EC2 instance (spot or on-demand)
+   random_password  credentials          Caddy TLS termination
+                                          Cloudflare A record — updated in
+                                          place, never deleted
+```
 
-Four Terraform stacks with deliberately different lifecycles:
+The panel never touches AWS directly — every action is a `workflow_dispatch`
+call, so GitHub Actions is the *only* thing with AWS credentials, and every
+provisioning action is versioned, logged, and reviewable in the Actions tab.
+
+### Four independent Terraform stacks, on purpose
 
 | Stack | Contains | Lifecycle |
 |---|---|---|
-| `terraform/bootstrap` | S3 state + data buckets | apply once |
-| `terraform/persistent` | 20GB volume, credentials | **never destroyed** |
-| `terraform/` | desktop VPC, SG, instance, DNS | destroyed freely |
-| `terraform/hub` | always-on control box | always up |
+| `terraform/bootstrap/` | S3 state backend | apply once, ever |
+| `terraform/persistent/` | 20GB EBS volume, desktop credentials | **never destroyed** |
+| `terraform/network/` | Shared VPC, subnet, security group | applied once, shared by all sessions |
+| `terraform/` | Per-session instance, per-session SG rules, DNS | destroyed every session |
 
-`prevent_destroy` inside the desktop stack would make `terraform destroy`
-*fail* rather than skip it — which is precisely why the volume lives in a
-separate stack. One-command teardown has to actually work.
+`prevent_destroy` on the volume, inside the desktop stack, would make
+`terraform destroy` *fail* rather than skip it — which defeats "one command
+down." Splitting the volume into its own stack is what makes teardown
+actually safe to run unattended, from a cron job, on every session.
 
-## The hard part: persistence
+## DevOps techniques in play
 
-Getting "everything survives destroy" right took four corrections. Every one of
-them was a mechanism **reporting success while doing nothing**:
+- **Infrastructure as Code**, split into 4 stacks by *lifecycle*, not by
+  service — the organizing question is "does this outlive the machine?", not
+  "is this networking or compute?"
+- **GitHub Actions as the control plane.** `workflow_dispatch` inputs are the
+  entire interface between the web panel and AWS; nothing else holds AWS
+  credentials. Every workflow has `concurrency` groups (per-username, so two
+  guests never queue behind each other), `timeout-minutes` (bounded so a
+  wedged apply can't hold a lock for GitHub's 6-hour default), and
+  `-lock-timeout` on every Terraform call (a lock contention is a
+  wait-your-turn situation, not a failure).
+- **S3 native state locking** (`use_lockfile`) instead of a DynamoDB lock
+  table — fewer resources to create, secure, and bill, and the DynamoDB
+  pattern is deprecated in current Terraform.
+- **Serverless control plane** (Vercel + Upstash Redis) fronting a
+  **fixed-cost compute plane** (AWS) — the always-on part of this project
+  (the website) runs for effectively nothing, and the part that costs real
+  money (a GPU-capable desktop) exists only while someone is using it.
+- **A real tiered-access model**, not a toggle: admins, permanent users, and
+  guests, backed by Redis, enforced server-side (never trusted from the
+  client) at the one place that actually dispatches AWS work.
+- **A scheduled reaper**, not an honor system. Guest desktops carry a
+  `Role=guest-desktop` AWS tag (no hardcoded username list — discovery is by
+  tag) and get destroyed by a cron-triggered workflow the moment they exceed
+  an admin-configurable time limit, based on the EC2 API's own `LaunchTime`
+  rather than an in-guest activity tracker that could silently go stale.
+- **An AMI baking pipeline** (`bake-ami.yml`) that pre-installs everything
+  user-data would otherwise fetch on every boot — apt packages, the Caddy
+  binary with its DNS plugin, and (opt-in) the NVIDIA driver stack — cutting
+  boot-to-ready time and, more importantly, removing *variable* boot time
+  caused by fetching things over the network on every single start.
+- **Opt-in GPU support** (NVENC hardware encoding via `-e gpu=true`) that
+  **hard-fails** rather than silently falling back to software encoding if
+  the GPU isn't actually usable at boot — a silent fallback would bill 3.2x
+  more for zero benefit and nobody would ever notice.
+- **Cost decisions backed by measurement, not assumption**: spot vs
+  on-demand, region choice, availability-zone choice, and instance family
+  were all decided from real measured numbers (see below), including
+  reversing a decision after the numbers came back wrong.
+- **Security modeled as least-privilege by session**: no NAT Gateway (a
+  public subnet is cheaper for outbound-only egress), no Elastic IP (bills
+  whether attached or not, and the address changes every session anyway),
+  DNS updated in place rather than deleted (deleting it caused ~30 minutes of
+  cached NXDOMAIN on the *next* session), and no secrets ever routed through
+  a `workflow_dispatch` input on a public repository (GitHub echoes
+  `inputs.*` into job logs unmasked — only `secrets.*` is protected).
 
-**1. The mount that succeeded without mounting.** The volume's label didn't
-match the fstab entry. Because the options included `nofail`, `mount` returned
-**exit 0**, so `set -e` caught nothing and Docker wrote 4.2GB to the ephemeral
-root disk with no error anywhere. A safety option had converted a hard failure
-into a silent one. Fixed with UUID-based fstab and an explicit assertion —
-`findmnt` must confirm the mount or the boot aborts.
+## Real bugs, found and fixed
 
-**2. `data-root` moved 976KB of 5.8GB.** Ubuntu's `docker.io` uses the
-containerd snapshotter, so image and container layers live in
-`/var/lib/containerd` — which Docker's `data-root` does not control. `docker
-info` cheerfully reported the correct path. Symptom: a 2GB image re-pulled
-every boot and `apt install` silently lost on destroy. Fixed by bind-mounting
-`/var/lib/containerd` onto the volume before containerd starts, asserted by
-comparing filesystem **device IDs** rather than trusting `docker info`.
+Not a changelog — the actual failure, the actual root cause, and how it was
+caught. Nearly all of these were **silent**: something reported success while
+doing the wrong thing, which is the failure mode that actually costs time.
 
-**3. Let's Encrypt ran out.** Caddy stored certificates on the ephemeral disk,
-so every rebuild requested a fresh one. The limit is **5 certificates per
-hostname per 168 hours** — five rebuilds in one afternoon locked the hostname
-out for a day. Fixed with `XDG_DATA_HOME` pointed at the volume.
+**Reaper destroying the wrong desktops.** The scheduled reaper discovered
+"every live desktop" and killed anything past the guest time limit — with no
+way to tell a guest's desktop from the owner's own persistent one. Fixed by
+tagging every instance `Role=guest-desktop` vs `user-desktop` at creation
+time, threaded end-to-end from the panel's dispatch call through to the
+Terraform tag, and verified with a real `terraform plan` diff on both
+branches before merging.
 
-**4. `systemctl reload` failed silently.** An unquoted heredoc expanded `$2`,
-`$1` and `$4` inside a bcrypt hash, leaving an 11-character fragment. Caddy
-rejected the config, `reload` reported success, and Caddy kept serving the
-*previous* config. The fault sat undetected until a restart forced it to load
-and took the dashboard down. Fixed with a quoted heredoc, a hash-format
-assertion, and `caddy validate` gating the restart.
+**A public API endpoint returning 422 on every guest launch.** The panel
+(deployed instantly via Vercel) started sending an `is_guest` input the
+`desktop-up.yml` workflow on `main` didn't declare yet — because GitHub Actions
+always reads workflow *files* from the ref being run, and the feature branch
+containing that input hadn't been merged. The panel and the infra it drives
+can silently drift out of sync the moment one deploys faster than the other.
 
-**The pattern:** none of these were caught by reading code or checking status.
-All were caught by measuring the outcome — `findmnt`, device IDs, `du -x`,
-installing a package and looking for it after a destroy.
+**The admin console served the guest panel instead.** `admin.desktop.mnour.dev`
+was rewritten to `/admin.html` at the same path (`/`) as the main panel — and
+Vercel's CDN cache key is **path-only, not `Host`-varying**, so the two
+domains collided and one served the other's cached response
+(confirmed via `X-Vercel-Cache: HIT`). Fixed by redirecting to a distinct
+path instead of rewriting to a shared one.
 
-> If it should outlive the machine, it belongs in the stack that outlives the
-> machine.
+**The panel looked frozen on "Starting…" for the entire multi-minute boot.**
+Clearing the "Starting…" spinner and firing the one-time
+auto-open-a-new-tab were both gated on the *exact same* condition
+(`status === "active"`, i.e. a full health check pass) — so the page sat on a
+bare spinner through the whole boot even though the real booting-with-credentials
+card was available the entire time, and only a manual refresh (which reset
+the in-memory flag) ever revealed it. Fixed by splitting "clear the spinner"
+from "auto-open the tab" into two independent conditions. A related bug in
+the same code path — mobile browsers throttle or freeze `setInterval` in a
+backgrounded tab, so returning to the tab never re-polled — was fixed with
+explicit `visibilitychange`/`focus` listeners.
 
-Applied three times before it stuck: data, then certificates, then credentials.
+**The owner's own persistent desktop was unrecoverable — twice, from the same
+root cause.** The EBS volume holding `/config` lives in its own
+never-destroyed Terraform stack, keyed to a `region`/`az_suffix` pair that
+has to match the desktop stack exactly. It drifted out of sync **twice**:
+once when the desktop moved from Frankfurt to Mumbai and the persistent
+stack's defaults weren't updated, and again when an aborted UAE migration
+attempt got reverted everywhere *except* this one file. Both times the
+failure mode was the same: a `terraform apply` on the desktop stack failing
+with "your query returned no results" on the volume lookup, because the
+volume terraform *thought* existed had actually been deleted out from under
+a stale region pointer. Fixed both times by correcting the region/AZ
+defaults and re-applying to create a fresh volume in the right place — safe
+specifically *because* the old volume no longer existed to lose.
 
-**Verified by a real destroy/apply cycle:** the same container id came back, a
-package installed before teardown was still present, zero certificate requests,
-and **boot to ready fell from 195s to 20s**.
+**A GPU AMI bake that made boot slower, not faster.** The bake workflow
+hardcoded the container image tag (`ubuntu-kde`) while the desktop's actual
+default had moved to `debian-kde` — so the AMI baked in the wrong image's
+layers while the boot still had to pull the real one, adding disk-hydration
+time for zero benefit (383s vs. a 325s baseline). Fixed by extracting the
+image tag from `terraform/variables.tf` at bake time instead of hardcoding
+it — and while investigating, found the *actual* bottleneck wasn't the image
+pull at all: it was Caddy making a live build request to `caddyserver.com`
+for a DNS plugin, on every single boot. Fixed by baking the Caddy binary
+itself into the AMI, with a `caddy list-modules` check before trusting it.
 
-## Design decisions worth defending
+**A cloud provider quota check that lied — twice.**
+`aws ec2 run-instances --dry-run` reported "Request would have succeeded" for
+a GPU instance type while the account's actual GPU vCPU quota was still `0`.
+The real launch failed both times with `VcpuLimitExceeded` — once for a live
+test, once inside the bake workflow. `--dry-run` validates IAM permissions,
+not service quotas. Fixed by trusting only the real
+`aws service-quotas get-service-quota` value going forward, never the
+dry-run signal.
 
-**No NAT Gateway.** It costs $0.045/hr plus data processing — more than the
-instance it would serve. A public subnet with a public IP used for egress does
-the job. (Corollary learned later: this also means the public IP *cannot* be
-removed. An Internet Gateway NATs using the instance's own public address, so
-"put it behind a tunnel to drop the IP" does not work without paying for NAT.)
+**A region decision reversed after the numbers came back wrong.** UAE
+(`me-central-1`) looked like the obvious latency win over Mumbai — until
+`RunInstances` returned throttling errors for every instance type tested, and
+research turned up a real physical incident (a drone-strike/fire) that had
+degraded that region's capacity for months. A full network stack had already
+been applied there before the numbers ruled it out; rather than migrate
+blind, every active pointer (workflows, Terraform defaults, panel pricing
+constant) was reverted back to Mumbai, and the UAE stack left dormant rather
+than torn down mid-decision.
 
-**No Elastic IP on the desktop.** An EIP bills whether attached or not, and the
-desktop's address changes every session anyway. DNS is updated in place instead.
+**A security group description with an apostrophe.** `"when it's on"` was
+silently rejected by `CreateSecurityGroup`'s allowed character set — but only
+at real `apply` time, never at `validate` or `plan`. Fixed, then every SG
+description across all three stacks was audited for the same class of bug.
 
-**DNS is updated, never deleted.** Deleting the record on teardown caused
-NXDOMAIN responses to be cached for ~30 minutes, so the *next* session was
-unreachable long after it was healthy. Teardown now parks the record at
-`192.0.2.1` — RFC 5737 TEST-NET-1, guaranteed unroutable.
+**A stale provider lockfile, rewritten on every local `terraform init`.**
+Developing on ARM64 while CI runs AMD64 meant `.terraform.lock.hcl` churned
+on every local init. Fixed with `terraform providers lock -platform=linux_amd64
+-platform=linux_arm64` across all three stacks, so the lockfile is valid on
+both without either side fighting the other.
 
-**Spot instances.** ~$0.10/hr against ~$0.19 on-demand for `c7i.xlarge`.
-
-**Non-burstable instance family.** `t3` is cheaper but burstable: sustained
-video encoding exhausts CPU credits and the desktop degrades exactly when it is
-being used. Dedicated vCPU is a requirement, not a preference.
-
-**S3 native state locking.** `use_lockfile` rather than a DynamoDB lock table —
-the DynamoDB pattern is deprecated in current Terraform, and this is one fewer
-resource to create, secure and bill.
-
-**No secrets through workflow inputs.** This repository is public. GitHub echoes
-each step's `env:` block into job logs and does **not** mask `inputs.*` — only
-`secrets.*`. `::add-mask::` cannot rescue it either, because the `run:` script
-that would perform the masking is itself echoed. The password input was removed
-and credentials are generated by `random_password` in the persistent stack.
-
-**Completion is judged by the desktop answering, not by the workflow finishing.**
-Terraform exits well before TLS settles. The control panel polls `/healthz`
-until it returns 200, then redirects.
-
-**webtop over neko.** neko was built first and worked. webtop won on audio and
-microphone by default, a tunable encoder, and — critically — **a single TCP
-port instead of a 100-port UDP range**, which is what made it possible to put a
-CDN in front. Also worth recording: neko's multiuser provider defaults
-`admin_profile` to `"{}"`, which unmarshals to a struct where every bool
-including `can_host` is false. Video renders perfectly and every click is
-silently ignored, with nothing logged, because "can watch but not host" is a
-legitimate state. Diagnosed by running `neko serve --help` inside the
-container, not from the docs.
+**Callback secret mismatch.** `HUB_CALLBACK_SECRET` differed between the
+GitHub secret and the Vercel env var by (almost certainly) trailing
+whitespace picked up during initial setup — surfacing as a flat `403 bad
+callback secret` on every session-ready callback, fixed by regenerating and
+resetting both sides explicitly rather than guessing which one was wrong.
 
 ## Cost
 
 | State | Measured |
 |---|---|
-| Running (`c7i.xlarge` spot, ap-south-1c) | **$0.0529/hr** |
+| Running, `c7i.xlarge` spot, `ap-south-1c` | **$0.0529/hr** |
+| Running, `g4dn.xlarge` spot + GPU (opt-in) | ~3.2x the CPU rate |
 | 2 hr/day × 20 days | ~$2.12/month |
-| Destroyed | **~$1.90/month** — the 20GB volume, nothing else |
+| Fully destroyed | **~$1.90/month** — the 20GB volume, nothing else |
 
-That $1.90 is the price of "destroy the machine, keep the work". It is a
-deliberate trade, not overhead.
+That $1.90 is the price of "destroy the machine, keep the work." It's a
+deliberate trade, not overhead — and it's the number that makes "disposable
+compute" actually disposable instead of just cheap.
 
 ## Known gaps
 
 Stated plainly rather than omitted.
 
-- **The desktop is internet-facing.** The security group allows 80 and 443 from
-  `0.0.0.0/0`; Caddy basic auth is the only barrier, and the container has
-  passwordless `sudo`. Cloudflare Access is the intended fix. It was blocked
-  while this lived on `mnour.sd`, whose account role is *Limited
-  Account-Level Access* - Access moved with the hostname to `mnour.dev`,
-  the owner's own, fully-administered account, specifically to unblock this.
-  Not yet configured as of this move; still open.
-- **GitHub Actions uses static AWS keys.** OIDC is the intended design and needs
-  `iam:CreateRole`, which this IAM user is denied. The scoped policy is written
-  and ready at `docs/aws-permissions-policy.json`, awaiting an account admin.
-- **No SSM.** Same missing permission. Debugging uses SSH on port 22 behind a
-  feature flag (`enable_ssh`), off by default.
-- **Region is `ap-south-1` (Mumbai), not `me-central-1` (UAE).** UAE is the
-  closest region to Abu Dhabi (~10–15ms) but on 2026-08-08 it returned
-  `RequestLimitExceeded` on `RunInstances` for every instance type tested,
-  while the identical call succeeded elsewhere. Mumbai is the compromise:
-  ~40–55ms, and spot at $0.0529/hr against UAE's $0.0878 and Frankfurt's
-  $0.1004. Moving is a `var.region` + `var.az_suffix` change, plus the
-  `HOURLY_USD` constant in two places.
-- **The zone is pinned to `c`, not `a`.** Spot varies ~23% between zones in
-  ap-south-1 and `a` is the most expensive of the three. `var.az_suffix`
-  exists so that is a decision rather than an accident.
-- **No automatic teardown.** Nothing destroys an idle desktop. A forgotten
-  session bills $0.0529/hr indefinitely.
-- **Package installs are not declarative.** They persist on the volume, which
-  is what was wanted, but they are not recorded anywhere reviewable. Capturing
-  them into a file and raising a pull request remains the intended answer.
+- **GitHub Actions uses static AWS keys.** OIDC is the intended design; the
+  scoped IAM policy is written and ready at `docs/aws-permissions-policy.json`,
+  waiting on an account admin to attach it.
+- **No SSM agent on the instance.** Same missing permission as above — there
+  is currently no remote shell into a running desktop for diagnostics beyond
+  what CloudWatch metrics and the application's own health endpoint expose.
+- **Package installs are not declarative.** They persist on the volume,
+  which is the intended behavior, but nothing records *what* was installed
+  in a form that's reviewable in a diff.
+- **GPU quota approval is outside this project's control.** The `bake-ami`
+  and desktop-start GPU paths are fully built and tested for correctness, but
+  actually exercising them end-to-end is gated on an AWS service-quota
+  increase sitting in a manual review queue.
 
-## Repository
+## Repository layout
 
-    terraform/            desktop stack
-    terraform/persistent/ volume + credentials, never destroyed
-    terraform/bootstrap/  state buckets
-    terraform/hub/        always-on control box
-    hub/control/          stdlib-only control panel (start/destroy, live progress)
-    .github/workflows/    manual-dispatch START and DESTROY
-    scripts/set-dns.sh    in-place Cloudflare record update
-    docs/                 design spec, plan, IAM policy
+```
+terraform/                per-session desktop stack (instance, SG, DNS)
+terraform/persistent/     EBS volume + credentials — never destroyed
+terraform/network/        shared VPC/subnet/SG — applied once
+terraform/bootstrap/      S3 state backend — applied once, ever
+panel/                    Vercel serverless panel
+  api/                    session dispatch, status, admin endpoints
+  api/admin/              tier management, config, live state (admin-only)
+  lib/                    Redis-backed session/tier state, GitHub dispatch, auth
+  public/                 the panel and admin console front ends
+.github/workflows/
+  desktop-up.yml            start a session (owner or guest, CPU or GPU)
+  desktop-down.yml          destroy a session, keeping data if asked
+  desktop-wipe.yml          permanently delete saved data
+  desktop-reaper.yml        cron-scheduled guest time-limit enforcement
+  bake-ami.yml               pre-bake a CPU or GPU AMI
+scripts/set-dns.sh        in-place Cloudflare DNS update (never deletes)
+docs/                     design specs, implementation plans, IAM policy
+```

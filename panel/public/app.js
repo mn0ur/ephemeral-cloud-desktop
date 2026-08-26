@@ -20,6 +20,10 @@ let googleRendered = false;
 // Set when a desktop became ready but the browser refused to open the tab for
 // us, so the Running card can say so instead of the user seeing nothing happen.
 let autoOpenBlocked = false;
+// True from the moment WE dispatch a start until the resulting session either
+// reaches "active" (auto-open fires) or disappears. Kept separate from `busy`
+// so clearing busy early (see poll()) doesn't also skip the one auto-open.
+let startedByMe = false;
 
 function fmtDur(sec) {
   const m = Math.floor(sec / 60), h = Math.floor(m / 60);
@@ -125,6 +129,7 @@ async function go(action) {
   if (action === "destroy" && !confirm("Destroy your desktop? Your files survive only if you chose to keep them.")) return;
   $("err").textContent = "";
   busy = true; pendingAction = action;
+  if (action === "start") startedByMe = true;
   renderMine({ progress: null });
   try {
     const r = await fetch("/api/dispatch", {
@@ -184,9 +189,21 @@ async function poll() {
     $("g-signed").style.display = session ? "flex" : "none";
     if (session) $("g-email").textContent = session.email;
 
-    // Auto-open only on a START we initiated - without checking which action,
-    // a destroy that briefly still saw an active session would send the user
-    // INTO the desktop they just asked to tear down.
+    // Clear the client-side "Starting..." overlay the moment the session
+    // actually exists server-side (status "pending" or "ready"), NOT only
+    // once it reaches "active". Those two used to be the same condition,
+    // which meant the page sat on a bare "Starting..." spinner for the
+    // entire multi-minute container boot - even though the booting card
+    // with real credentials was available the whole time - and only a
+    // manual refresh (which resets `busy` to its default) ever revealed it.
+    if (busy && pendingAction === "start" && s.my_session && s.my_session.status !== "error") {
+      busy = false; pendingAction = null;
+    }
+    if (busy && pendingAction === "destroy" && !s.my_session) { busy = false; pendingAction = null; }
+
+    // Auto-open is separate from clearing busy above, and fires exactly once
+    // per session becoming active - tracked on the session object itself so
+    // it survives busy already being false by the time healthz passes.
     //
     // A NEW TAB, not location.href: the desktop's login prompt asks for the
     // username/password shown on THIS page. Navigating this tab away took the
@@ -194,8 +211,8 @@ async function poll() {
     // the login prompt with no way to answer it. Falling through to
     // renderMine() below keeps this tab on the "Running" card with creds
     // visible, whichever tab the user actually looks at.
-    if (busy && pendingAction === "start" && s.my_session?.status === "active") {
-      busy = false; pendingAction = null;
+    if (startedByMe && s.my_session?.status === "active") {
+      startedByMe = false;
       // window.open() here runs from a TIMER, not a click, so it is not a user
       // gesture - and popup blockers refuse those, returning null, silently.
       // The desktop was ready and the page appeared to do nothing at all.
@@ -204,7 +221,7 @@ async function poll() {
       try { opened = window.open(s.my_session.url, "_blank", "noopener"); } catch { /* blocked */ }
       autoOpenBlocked = !opened;
     }
-    if (busy && pendingAction === "destroy" && !s.my_session) { busy = false; pendingAction = null; }
+    if (!s.my_session) startedByMe = false;
 
     renderMine(s);
   } catch (e) {

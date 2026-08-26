@@ -52,10 +52,13 @@ variable "region" {
 
     Was left at eu-central-1 when the desktop moved to ap-south-1 on
     2026-08-10, which is how this stack ended up tracking a volume in a
-    region the desktop no longer runs in.
+    region the desktop no longer runs in. Then briefly pointed at
+    me-central-1 during the aborted 2026-08-25 UAE migration and never
+    reverted along with everything else - caught only when the next apply
+    tried to create the volume in me-central-1a instead of ap-south-1c.
   EOT
   type        = string
-  default     = "me-central-1"
+  default     = "ap-south-1"
 }
 
 variable "project" {
@@ -83,7 +86,7 @@ variable "az_suffix" {
     this stack tracked had already been deleted out from under it.
   EOT
   type        = string
-  default     = "a"
+  default     = "c"
 }
 
 locals {

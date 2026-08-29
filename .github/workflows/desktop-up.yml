@@ -153,14 +153,49 @@ jobs:
               echo "reusing existing guest volume $VOL_ID for $GUEST_USERNAME"
             fi
             echo "TF_VAR_user_volume_id=$VOL_ID" >> "$GITHUB_ENV"
+
+            # A per-guest password - but NOT a fresh one every time. user-data.sh.tpl
+            # bind-mounts containerd's storage onto this same volume so that
+            # installed packages survive a destroy, which means the webtop
+            # CONTAINER itself survives too: `docker inspect webtop` finds it
+            # on the new instance and `docker start`s it rather than recreating
+            # it. `docker start` cannot change a container's env vars, so the
+            # CUSTOM_USER/PASSWORD it was originally created with keeps being
+            # what it actually checks logins against - forever - no matter what
+            # password this run generates and hands to the panel.
+            #
+            # Found from a real report: the panel showed a fresh password after
+            # a persist=true restart, and it did not work - the container was
+            # still running with the password from its first-ever creation.
+            #
+            # Fixed by making the password stick to the volume the same way
+            # the container already does: store it as a tag on first creation,
+            # read it back on every later run instead of generating a new one.
+            # Tags, not SSM Parameter Store, because this script's AWS
+            # credentials are already proven to have ec2:CreateTags/DescribeVolumes
+            # (used two lines above) - reusing that avoids needing a new grant
+            # for a permission set that may not be attached.
+            GUEST_PASSWORD=$(aws ec2 describe-tags \
+              --filters "Name=resource-id,Values=$VOL_ID" "Name=key,Values=DesktopPassword" \
+              --query 'Tags[0].Value' --output text)
+            if [ "$GUEST_PASSWORD" = "None" ] || [ -z "$GUEST_PASSWORD" ]; then
+              GUEST_PASSWORD="$(openssl rand -hex 16)"
+              aws ec2 create-tags --resources "$VOL_ID" --tags "Key=DesktopPassword,Value=$GUEST_PASSWORD"
+              echo "generated and stored a new password for $GUEST_USERNAME's volume"
+            else
+              echo "reusing $GUEST_USERNAME's stored password - their desktop container survives on this volume, so a fresh password here would not match what it actually runs with"
+            fi
           else
             echo "persist=false - no volume, session is fully ephemeral"
             echo "TF_VAR_user_volume_id=" >> "$GITHUB_ENV"
+
+            # No volume means no surviving container to mismatch - a fresh
+            # password every time is correct and simpler here.
+            GUEST_PASSWORD="$(openssl rand -hex 16)"
           fi
 
-          # A per-guest password. Never the owner's persistent-stack password -
-          # that would hand every guest the same credential the owner uses.
-          GUEST_PASSWORD="$(openssl rand -hex 16)"
+          # Never the owner's persistent-stack password - that would hand
+          # every guest the same credential the owner uses.
           echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
           echo "::add-mask::$GUEST_PASSWORD"
 

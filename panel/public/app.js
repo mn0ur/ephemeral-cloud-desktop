@@ -103,9 +103,9 @@ function renderMine(s) {
   // is derived from the Google account rather than chosen, so it is not
   // guessable by the person using it.
   html += `<div class="creds">
-      <div><span class="ck">username</span><span class="cv">${esc(session.user_id)}</span></div>
+      <div><span class="ck">username</span><span class="cv">${esc(session.user_id)}</span><button type="button" class="copy-btn" data-copy="${esc(session.user_id)}" title="Copy username">&#128203;</button></div>
       ${mine.password
-        ? `<div><span class="ck">password</span><span class="cv">${esc(mine.password)}</span></div>`
+        ? `<div><span class="ck">password</span><span class="cv">${esc(mine.password)}</span><button type="button" class="copy-btn" data-copy="${esc(mine.password)}" title="Copy password">&#128203;</button></div>`
         : '<div class="sub">Password not recorded &mdash; this desktop was recovered rather than started normally.</div>'}
       <div class="sub" style="margin-top:.35rem">Same username every time. The password changes each start.</div>
     </div>`;
@@ -121,6 +121,35 @@ function renderMine(s) {
   if (!running) html += stepsHtml(s.progress);
   box.innerHTML = html;
   $("destroy").onclick = () => go("destroy");
+  box.querySelectorAll(".copy-btn").forEach((btn) => (btn.onclick = () => copyToClipboard(btn)));
+}
+
+// navigator.clipboard needs a secure context, which this page always is
+// (HTTPS), but it's still wrapped: some in-app/webview browsers (notably on
+// Android) omit or restrict it, and a silently-ignored click looks identical
+// to a working one - so the fallback and the try/catch both matter here.
+async function copyToClipboard(btn) {
+  const text = btn.dataset.copy;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    const original = btn.innerHTML;
+    btn.innerHTML = "&#10003;";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.innerHTML = original; btn.classList.remove("copied"); }, 1200);
+  } catch {
+    $("err").textContent = "Couldn't copy automatically - select the text and copy it by hand.";
+  }
 }
 
 async function go(action) {

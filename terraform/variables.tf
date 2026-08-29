@@ -216,6 +216,41 @@ variable "framerate" {
   default     = 30
 }
 
+variable "video_bitrate_kbps" {
+  description = <<-EOT
+    Selkies streams over its "websockets" transport, not WebRTC - a
+    deliberate choice (see README: single TCP port, no UDP range, so a CDN
+    can sit in front). That means there is no packet-loss-tolerant fallback:
+    it is a constant-bitrate stream over TCP, and TCP does not skip a frame
+    under congestion, it stalls and retransmits. Selkies' own default is a
+    flat 8000 (8 Mbps) CBR with no adaptation - fine on a wired connection,
+    but a real mobile uplink that can't sustain 8Mbps continuously will back
+    up the stream's internal buffer (SELKIES_BACKPRESSURE_QUEUE_SIZE, up to
+    120 frames) before it starts dropping, which is felt as exactly "starts
+    perfect, then a moment later goes choppy with glitchy audio" - the
+    buffer filling is also why the in-client latency stat reads 150-200+ms
+    instead of the ~40-55ms real network RTT: it's queueing delay, not
+    distance.
+
+    2500 is a deliberately conservative ceiling for a mobile connection.
+    Raise it for a client known to be on solid wifi/ethernet.
+  EOT
+  type        = number
+  default     = 2500
+}
+
+variable "congestion_control" {
+  description = <<-EOT
+    Selkies defaults this OFF, which is what let the flat 8Mbps CBR above run
+    unmoderated regardless of actual link capacity. Turning it on adapts the
+    bitrate down (transport-wide congestion signal) instead of blindly
+    pushing the configured rate into a link that can't take it - the softer
+    failure mode is a temporary quality drop, not a stall.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "timezone" {
   type    = string
   default = "Asia/Dubai"

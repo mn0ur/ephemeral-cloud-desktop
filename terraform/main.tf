@@ -331,6 +331,8 @@ resource "aws_instance" "desktop" {
     encoder                  = var.gpu ? var.encoder_gpu : var.encoder
     gpu                      = var.gpu ? "true" : "false"
     framerate                = var.framerate
+    video_bitrate_kbps       = var.video_bitrate_kbps
+    congestion_control       = var.congestion_control ? "true" : "false"
     fresh                    = var.fresh ? "true" : "false"
     cloudflare_dns_api_token = var.cloudflare_dns_api_token
     access_enabled           = local.access_enabled ? "true" : "false"

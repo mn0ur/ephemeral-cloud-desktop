@@ -432,6 +432,8 @@ else
     -e SELKIES_CLIPBOARD_ENABLED=true \
     -e SELKIES_ENCODER='${encoder}' \
     -e SELKIES_FRAMERATE='${framerate}' \
+    -e SELKIES_VIDEO_BITRATE='${video_bitrate_kbps}' \
+    -e SELKIES_CONGESTION_CONTROL='${congestion_control}' \
     "$IMAGE"
 fi
 

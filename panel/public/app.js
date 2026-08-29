@@ -13,6 +13,26 @@ const esc = (s) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
 
+// The desktop's login is HTTP Basic Auth (linuxserver/webtop's embedded
+// nginx), which technically still needs a username - but the browser never
+// has to ask for one. Basic Auth credentials embedded in the URL itself
+// (https://user:pass@host/) are accepted by every mainstream browser on a
+// direct top-level navigation, which is exactly how this link is opened
+// (window.open / a plain <a>, never an iframe). So "log in with only the
+// password" is real, not just a UI simplification: the username still
+// travels, just never in front of the person copying anything.
+function loginUrl(url, user, pass) {
+  if (!url || !user || !pass) return url;
+  try {
+    const u = new URL(url);
+    u.username = user;
+    u.password = pass;
+    return u.toString();
+  } catch {
+    return url; // malformed URL - fall back rather than hand back garbage
+  }
+}
+
 let session = null;
 let busy = false;
 let pendingAction = null;
@@ -99,24 +119,24 @@ function renderMine(s) {
   }
   html += "</div>";
 
-  // Username AND password together: the desktop asks for both, and the username
-  // is derived from the Google account rather than chosen, so it is not
-  // guessable by the person using it.
+  // Password only, deliberately - see loginUrl() above. The username still
+  // exists (Basic Auth needs one) but nobody using this page has to see,
+  // type, or copy it: the Open-desktop link already carries it.
+  const openUrl = loginUrl(mine.url, session.user_id, mine.password);
   html += `<div class="creds">
-      <div><span class="ck">username</span><span class="cv">${esc(session.user_id)}</span><button type="button" class="copy-btn" data-copy="${esc(session.user_id)}" title="Copy username">&#128203;</button></div>
       ${mine.password
-        ? `<div><span class="ck">password</span><span class="cv">${esc(mine.password)}</span><button type="button" class="copy-btn" data-copy="${esc(mine.password)}" title="Copy password">&#128203;</button></div>`
+        ? `<div><span class="ck">password</span><span class="cv">${esc(mine.password)}</span><button type="button" class="copy-btn" data-copy="${esc(mine.password)}" title="Copy password">&#128203;</button></div>
+      <div class="sub" style="margin-top:.35rem">Opening the desktop below logs you straight in. Only copy this if it asks anyway, or you're opening it in a different browser.</div>`
         : '<div class="sub">Password not recorded &mdash; this desktop was recovered rather than started normally.</div>'}
-      <div class="sub" style="margin-top:.35rem">Same username every time. The password changes each start.</div>
     </div>`;
 
   if (running && autoOpenBlocked) {
     html += `<div class="steps" style="border-color:var(--green-dim)">
         <div><span class="dot up"></span> <strong>Your desktop is ready.</strong></div>
-        <div class="sub">The browser blocked the tab we tried to open for you &mdash; use the button below. Keep this page open: the desktop asks for the username and password shown here.</div>
+        <div class="sub">The browser blocked the tab we tried to open for you &mdash; use the button below.</div>
       </div>`;
   }
-  if (mine.url) html += `<a class="open" href="${esc(mine.url)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
+  if (mine.url) html += `<a class="open" href="${esc(openUrl)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
   html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
   if (!running) html += stepsHtml(s.progress);
   box.innerHTML = html;
@@ -234,12 +254,12 @@ async function poll() {
     // per session becoming active - tracked on the session object itself so
     // it survives busy already being false by the time healthz passes.
     //
-    // A NEW TAB, not location.href: the desktop's login prompt asks for the
-    // username/password shown on THIS page. Navigating this tab away took the
-    // credentials off screen at the exact moment they were needed, leaving
-    // the login prompt with no way to answer it. Falling through to
-    // renderMine() below keeps this tab on the "Running" card with creds
-    // visible, whichever tab the user actually looks at.
+    // A NEW TAB, not location.href: with the password baked into the URL
+    // (see loginUrl()) the desktop no longer needs this page open to log in,
+    // but navigating THIS tab away would still lose the Destroy button and
+    // the fallback copy-the-password card if auto-open gets blocked. Falling
+    // through to renderMine() below keeps this tab on the "Running" card,
+    // whichever tab the user actually looks at.
     if (startedByMe && s.my_session?.status === "active") {
       startedByMe = false;
       // window.open() here runs from a TIMER, not a click, so it is not a user
@@ -247,7 +267,7 @@ async function poll() {
       // The desktop was ready and the page appeared to do nothing at all.
       // Capture the refusal so the card below can show a real call to action.
       let opened = null;
-      try { opened = window.open(s.my_session.url, "_blank", "noopener"); } catch { /* blocked */ }
+      try { opened = window.open(loginUrl(s.my_session.url, session?.user_id, s.my_session.password), "_blank", "noopener"); } catch { /* blocked */ }
       autoOpenBlocked = !opened;
     }
     if (!s.my_session) startedByMe = false;

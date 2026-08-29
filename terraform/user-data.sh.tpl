@@ -459,6 +459,64 @@ if [ -n "$CF_DNS_TOKEN" ]; then
 "
 fi
 
+# Password-only login gate, in front of webtop's own Basic Auth.
+#
+# A browser's native Basic Auth popup always shows a username field - that
+# is the browser's own UI, no server-side trick suppresses it. So getting an
+# actual password-only prompt for someone who was just handed the desktop's
+# URL (not the panel's own pre-authenticated link) means never letting that
+# native popup fire at all: this page takes its place.
+#
+# The trick is what happens on submit: it does NOT verify the password
+# itself. It builds https://USER:whatever-was-typed@host/ (the exact same
+# embedded-credential mechanism the panel's own "Open desktop" link already
+# uses) and navigates there. If the password is right, that request already
+# carries a valid Authorization header when it reaches the @has_auth check
+# below, so it skips straight past this page to the real desktop - no
+# duplicate check, one source of truth (webtop's own auth), same as always.
+# If it's wrong, webtop's nginx answers 401 same as it always would, and
+# the browser's native two-field popup appears as a fallback - an honest
+# failure mode, not a broken one.
+#
+# USER is baked in at boot, not typed or derived by JS from the hostname:
+# correct for BOTH a guest desktop (<username>.desktop...) and the owner's
+# own (desk.mnour.dev, where the hostname isn't the username at all).
+mkdir -p /etc/caddy/static
+if [ "$ACCESS_ENABLED" != "true" ]; then
+  cat >/etc/caddy/static/login.html <<'LOGINPAGE'
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cloud desktop</title>
+<style>
+ body{margin:0;font:16px/1.5 -apple-system,system-ui,sans-serif;background:#04070c;color:#c9d7e6;
+   display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
+ form{width:100%;max-width:320px;background:#0a121e;border:1px solid #16283c;border-radius:10px;padding:1.5rem}
+ h1{margin:0 0 1rem;font-size:1.05rem;color:#3dffa2}
+ input{width:100%;box-sizing:border-box;padding:.7rem;border-radius:7px;border:1px solid #1f3a55;
+   background:#070d16;color:#c9d7e6;font-size:1rem;margin-bottom:.8rem}
+ button{width:100%;padding:.7rem;border-radius:7px;border:1px solid #17a866;background:#0d1726;
+   color:#3dffa2;font-weight:600;font-size:.95rem;cursor:pointer}
+ .err{color:#ff9a94;font-size:.82rem;margin-top:.6rem;display:none}
+</style></head><body>
+<form id="f">
+  <h1>Desktop password</h1>
+  <input id="p" type="password" placeholder="Password" autofocus autocomplete="current-password">
+  <button type="submit">Log in</button>
+  <div class="err" id="e">Wrong password - the browser's own login box will ask again.</div>
+</form>
+<script>
+  document.getElementById("f").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var pass = document.getElementById("p").value;
+    if (!pass) return;
+    location.href = "https://__DESKTOP_USER__:" + encodeURIComponent(pass) + "@" + location.host + "/";
+  });
+</script>
+</body></html>
+LOGINPAGE
+  sed -i "s/__DESKTOP_USER__/${web_user}/" /etc/caddy/static/login.html
+fi
+
 cat >/etc/caddy/Caddyfile <<CADDY
 $HOSTNAME_FQDN {
 $TLS_BLOCK	encode zstd gzip
@@ -470,12 +528,33 @@ $TLS_BLOCK	encode zstd gzip
 	handle /healthz {
 		respond "ok" 200
 	}
+CADDY
 
+if [ "$ACCESS_ENABLED" = "true" ]; then
+  # Access enforces identity at the edge already - webtop runs with no
+  # password at all (see AUTH_ENV below), so there is nothing for a login
+  # gate to guard. Proxy straight through, unchanged from before this existed.
+  cat >>/etc/caddy/Caddyfile <<CADDY
 	handle {
 		reverse_proxy 127.0.0.1:3000
 	}
 }
 CADDY
+else
+  cat >>/etc/caddy/Caddyfile <<'CADDY'
+	@has_auth header Authorization *
+	handle @has_auth {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	handle {
+		root * /etc/caddy/static
+		rewrite * /login.html
+		file_server
+	}
+}
+CADDY
+fi
 
 # The /last-activity endpoint and its activity-tracker service were removed:
 # idle-based auto-destroy is out of scope (see the 2026-08-10 spec, D2), the

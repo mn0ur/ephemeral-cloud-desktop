@@ -76,40 +76,37 @@ jobs:
           set -uo pipefail
           USER="${{ inputs.guest_username }}"
 
-          # Look up by the SAME tag pair the start workflow uses, so this can
-          # only ever match a desktop data volume belonging to this user - not
-          # the owner's own volume, not the hub's, not a root disk.
-          read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes \
-            --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=desktop-guest-data" \
-            --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
-
-          if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
-            echo "No saved data volume for '$USER' - nothing to delete."
+          DELETED=0
+          # Both roles: "delete my data" means all of it. Same tag pair the
+          # start workflow uses, so this can only match this user's desktop
+          # data volumes - never the owner's, the hub's, or a root disk.
+          for ROLE in desktop-guest-data desktop-guest-data-windows; do
+            read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes \
+              --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=$ROLE" \
+              --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
+            if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
+              echo "no $ROLE volume for '$USER'"
+              continue
+            fi
+            echo "$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
+            # Refuse while attached: deleting under a running desktop corrupts
+            # whatever is mid-write, and AWS rejects it anyway.
+            if [ "$STATE" != "available" ]; then
+              echo "::error::Volume $VOL is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
+              exit 1
+            fi
+            aws ec2 delete-volume --volume-id "$VOL"
+            echo "deleted $VOL"
+            DELETED=$((DELETED+1))
+            sleep 3
+            if aws ec2 describe-volumes --volume-ids "$VOL" >/dev/null 2>&1; then
+              echo "::warning::$VOL still visible - deletion may still be settling."
+            fi
+          done
+          if [ "$DELETED" -eq 0 ]; then
+            echo "No saved data volumes for '$USER' - nothing to delete."
             echo "NOTHING_TO_DO=true" >> "$GITHUB_ENV"
             exit 0
-          fi
-
-          echo "volume: $VOL  state=$STATE  attached_to=$ATTACHED"
-
-          # Refuse while it is attached. Deleting a volume out from under a
-          # running desktop would corrupt whatever is mid-write, and AWS would
-          # reject it anyway - failing here says why, clearly.
-          if [ "$STATE" != "available" ]; then
-            echo "::error::Volume $VOL is '$STATE' (attached to ${ATTACHED:-unknown})."
-            echo "::error::Destroy the desktop first, then delete the data."
-            exit 1
-          fi
-
-          aws ec2 delete-volume --volume-id "$VOL"
-          echo "deleted $VOL"
-
-          # Confirm it is really gone rather than trusting the call. describe
-          # on a deleted volume returns InvalidVolume.NotFound.
-          sleep 3
-          if aws ec2 describe-volumes --volume-ids "$VOL" >/dev/null 2>&1; then
-            echo "::warning::$VOL still visible to the API - deletion may still be settling."
-          else
-            echo "confirmed: $VOL no longer exists"
           fi
 
           if [ -n "${HUB_CALLBACK_SECRET:-}" ]; then

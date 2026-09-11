@@ -244,6 +244,7 @@ jobs:
       - name: Wait for sysprep to shut the builder down (windows)
         if: inputs.os == 'windows'
         run: |
+          set -euo pipefail
           # The Windows bake ends with EC2Launch sysprep --shutdown, so
           # "stopped" IS the completion signal - no console marker to grep.
           # DCV + Chrome + 7-Zip + VLC + sysprep comfortably fits 30 minutes;
@@ -253,12 +254,22 @@ jobs:
             STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
               --query 'Reservations[0].Instances[0].State.Name' --output text)
             echo "$(date -u +%H:%M:%S) builder is $STATE"
+            OUT=$(aws ec2 get-console-output --instance-id "$INSTANCE_ID" --output text --query Output 2>/dev/null || true)
+            echo "$OUT" | grep -o 'BAKE [0-9:]* phase: [a-z0-9 ]*' | tail -1 || true
+            if echo "$OUT" | grep -q 'BAKE-FAILED'; then
+              echo "::error::$(echo "$OUT" | grep -o 'BAKE-FAILED.*' | tail -1)"
+              exit 1
+            fi
             if [ "$STATE" = "stopped" ]; then break; fi
             if [ "$STATE" = "terminated" ]; then echo "::error::builder terminated before sysprep finished"; exit 1; fi
             sleep 30
           done
           if [ "$STATE" != "stopped" ]; then
             echo "::error::builder did not reach stopped within 45 minutes - refusing to snapshot"
+            exit 1
+          fi
+          if ! echo "$OUT" | grep -q 'BAKE-COMPLETE'; then
+            echo "::error::builder stopped without a BAKE-COMPLETE marker - refusing to snapshot"
             exit 1
           fi
 

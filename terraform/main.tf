@@ -40,7 +40,12 @@ locals {
   display     = "mnour-desktop${local.user_suffix}"
   data_bucket = "${var.project}-${local.account_id}-data"
 
-  effective_hostname = var.username == "" ? var.hostname : "${var.username}.desktop.${var.cloudflare_zone}"
+  # Windows hosts are single-label under the zone, NOT <user>.desktop.<zone>:
+  # their record is Cloudflare-proxied, and the free Universal SSL certificate
+  # covers only <zone> and *.<zone> - a second level gets a TLS handshake
+  # failure at the edge (hit on the first Windows start, 2026-09-11). Linux
+  # records are DNS-only with Caddy doing TLS, so they keep the deeper name.
+  effective_hostname = var.username == "" ? var.hostname : (local.windows ? "${var.username}-desktop.${var.cloudflare_zone}" : "${var.username}.desktop.${var.cloudflare_zone}")
 
   # An EBS volume can only attach to an instance in its own availability zone,
   # so this must agree with wherever guest volumes are created - see the

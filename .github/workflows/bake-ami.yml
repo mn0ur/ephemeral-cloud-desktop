@@ -289,15 +289,32 @@ jobs:
           echo "$AMI_ID, tagged Project=ephemeral-desktop" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the builder for forensics (on failure)
-        if: failure() && env.INSTANCE_ID != ''
+        # GitHub's failure() is FALSE on cancellation, so a cancelled run (or
+        # a killed runner) must be caught explicitly here too - otherwise the
+        # builder is left running and billing with no forensics step ever
+        # firing to stop it.
+        if: (failure() || cancelled()) && env.INSTANCE_ID != ''
         run: |
           set -uo pipefail
-          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)
-          [ "$STATE" = "running" ] && aws ec2 stop-instances --instance-ids "$INSTANCE_ID" >/dev/null && echo "stopping $INSTANCE_ID"
-          VOL=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' --output text)
-          echo "::warning::builder $INSTANCE_ID kept STOPPED for forensics (root volume $VOL, ~\$4/month until deleted). Read C:\\bake.log by attaching $VOL to a Linux instance. Terminate the builder by hand when done."
-          echo "## Bake FAILED - builder kept for forensics" >> "$GITHUB_STEP_SUMMARY"
-          echo "instance \`$INSTANCE_ID\`, root volume \`$VOL\`. Read \`C:\\bake.log\` from the volume, then terminate the builder." >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.os }}" = "windows" ]; then
+            # Windows has no other log channel worth keeping: the only record
+            # of what went wrong is C:\bake.log on the root volume, so the
+            # builder is stopped (not terminated) and kept for forensics.
+            STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)
+            [ "$STATE" = "running" ] && aws ec2 stop-instances --instance-ids "$INSTANCE_ID" >/dev/null && echo "stopping $INSTANCE_ID"
+            VOL=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' --output text)
+            echo "::warning::builder $INSTANCE_ID kept STOPPED for forensics (root volume $VOL, ~\$4/month until deleted). Read C:\\bake.log by attaching $VOL to a Linux instance. Terminate the builder by hand when done."
+            echo "## Bake FAILED - builder kept for forensics" >> "$GITHUB_STEP_SUMMARY"
+            echo "instance \`$INSTANCE_ID\`, root volume \`$VOL\`. Read \`C:\\bake.log\` from the volume, then terminate the builder." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # A Linux builder's console output is already readable (see the
+            # "Wait for the image pull to finish" step above), and a stopped
+            # GPU builder's root volume is just cost with no extra signal to
+            # gain from keeping it - terminate it instead of leaving it billing.
+            aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" >/dev/null || true
+            echo "::warning::linux bake failed/cancelled - builder $INSTANCE_ID terminated (no forensics kept for linux)"
+            echo "## Bake FAILED - builder terminated (linux, no forensics needed)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Terminate the throwaway instance
         if: success()

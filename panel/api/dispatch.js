@@ -3,7 +3,7 @@ import {
   loadSessions, putSession, dropSession, setHasData, hasSavedData, logEvent,
 } from "../lib/state.js";
 import { dispatch, WORKFLOWS, tokenConfigured } from "../lib/github.js";
-import { activeCount, MAX_CONCURRENT } from "../lib/desktops.js";
+import { activeCount, MAX_CONCURRENT, requestedOs } from "../lib/desktops.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
@@ -44,13 +44,17 @@ export default async function handler(req, res) {
     // client only shows the checkbox when can_persist is true, but the
     // server is the actual enforcement point.
     const persist = session.can_persist && Boolean(req.body?.persist);
+    // Windows is admin-only for now. Same shape as persist: the selector is
+    // only rendered for admins, and this line is what actually enforces it.
+    const os = requestedOs(session.is_admin, req.body?.os);
     await putSession(me, {
       status: "pending",
       email: session.email,
       dispatched_at: Date.now() / 1000,
       is_guest: !session.can_persist,
+      os,
     });
-    await logEvent("login_start", { username: me, email: session.email, persist });
+    await logEvent("login_start", { username: me, email: session.email, persist, os });
 
     try {
       await dispatch(workflow, {
@@ -60,6 +64,7 @@ export default async function handler(req, res) {
         owner_email: session.email,
         persist: persist ? "true" : "false",
         is_guest: session.can_persist ? "false" : "true",
+        os,
       });
     } catch (e) {
       // Roll back on ANY dispatch failure - a GitHub outage, a revoked token or
@@ -86,7 +91,7 @@ export default async function handler(req, res) {
     }
     if (!sessions[target]) return res.status(404).json({ error: "no such session" });
     try {
-      await dispatch(workflow, { confirm: "DESTROY", guest_username: target });
+      await dispatch(workflow, { confirm: "DESTROY", guest_username: target, os: sessions[target]?.os || "linux" });
     } catch (e) {
       return res.status(e.status || 500).json({ error: e.message });
     }

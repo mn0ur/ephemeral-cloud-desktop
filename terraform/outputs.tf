@@ -29,3 +29,8 @@ output "admin_password" {
   value       = local.web_password
   sensitive   = true
 }
+
+output "login_user" {
+  description = "Account name the user signs in with. Linux: the panel username. Windows: the same, truncated to the 20-character local-account limit."
+  value       = local.windows ? local.windows_user : var.web_user
+}

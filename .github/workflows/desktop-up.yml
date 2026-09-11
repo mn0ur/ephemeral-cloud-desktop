@@ -60,6 +60,15 @@ on:
         description: "Spot is ~4x cheaper but can be unfulfillable - c7i.xlarge in ap-south-1c had no capacity twice on 2026-08-25, and a spot request that is never fulfilled just hangs the apply until the job timeout. Set false to retry the same session on-demand instead of waiting for capacity."
         type: boolean
         default: true
+      os:
+        description: "linux (default) or windows. Windows boots the baked Server 2025 + DCV image on instance_type_windows, always behind a Cloudflare-proxied hostname, with the user's NTFS volume as D:. Admin-only from the panel; there is no policy here - the panel is the enforcement point."
+        type: choice
+        options: [linux, windows]
+        default: linux
+      instance_type_windows:
+        description: "Instance type when os=windows. m6i.large (2 vCPU/8GB) is half the price of a 4-vCPU size because the Windows licence is per vCPU; set c7i.xlarge if video playback stutters."
+        required: false
+        default: "m6i.large"
 
 permissions:
   contents: read
@@ -138,19 +147,22 @@ jobs:
           # every future session. A Terraform data source cannot express
           # "create this if it does not exist" - so that check-then-create
           # happens here, with real AWS credentials, before apply runs at all.
+          # One volume per (user, OS): a Linux volume is ext4 carrying
+          # containerd state, Windows needs NTFS - they cannot be shared.
+          if [ "${{ inputs.os }}" = "windows" ]; then ROLE=desktop-guest-data-windows; SIZE=20; else ROLE=desktop-guest-data; SIZE=15; fi
           if [ "${{ inputs.persist }}" = "true" ]; then
             VOL_ID=$(aws ec2 describe-volumes \
-              --filters "Name=tag:Owner,Values=$GUEST_USERNAME" "Name=tag:Role,Values=desktop-guest-data" \
+              --filters "Name=tag:Owner,Values=$GUEST_USERNAME" "Name=tag:Role,Values=$ROLE" \
               --query 'Volumes[0].VolumeId' --output text)
             if [ "$VOL_ID" = "None" ] || [ -z "$VOL_ID" ]; then
               VOL_ID=$(aws ec2 create-volume \
                 --region "$AWS_REGION" --availability-zone "$AWS_AZ" \
-                --size 15 --volume-type gp3 --encrypted \
-                --tag-specifications "ResourceType=volume,Tags=[{Key=Owner,Value=$GUEST_USERNAME},{Key=Role,Value=desktop-guest-data},{Key=ManagedBy,Value=workflow}]" \
+                --size "$SIZE" --volume-type gp3 --encrypted \
+                --tag-specifications "ResourceType=volume,Tags=[{Key=Owner,Value=$GUEST_USERNAME},{Key=Role,Value=$ROLE},{Key=ManagedBy,Value=workflow}]" \
                 --query VolumeId --output text)
-              echo "created guest volume $VOL_ID for $GUEST_USERNAME"
+              echo "created $ROLE volume $VOL_ID for $GUEST_USERNAME"
             else
-              echo "reusing existing guest volume $VOL_ID for $GUEST_USERNAME"
+              echo "reusing existing $ROLE volume $VOL_ID for $GUEST_USERNAME"
             fi
             echo "TF_VAR_user_volume_id=$VOL_ID" >> "$GITHUB_ENV"
 
@@ -212,6 +224,8 @@ jobs:
           TF_VAR_is_guest: ${{ inputs.is_guest }}
           TF_VAR_use_spot: ${{ inputs.use_spot }}
           TF_VAR_gpu: ${{ inputs.gpu }}
+          TF_VAR_os: ${{ inputs.os }}
+          TF_VAR_instance_type_windows: ${{ inputs.instance_type_windows }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
@@ -236,6 +250,7 @@ jobs:
           URL=$(terraform -chdir=terraform output -raw url)
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)
           INSTANCE_ID=$(terraform -chdir=terraform output -raw instance_id)
+          LOGIN_USER=$(terraform -chdir=terraform output -raw login_user)
           LAUNCHED_AT=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
             --query 'Reservations[0].Instances[0].LaunchTime' --output text | \
             xargs -I{} date -u -d {} +%s)
@@ -255,7 +270,9 @@ jobs:
             --arg password "$PASSWORD" \
             --arg owner_email "${{ inputs.owner_email }}" \
             --arg launched_at "$LAUNCHED_AT" \
-            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber)}')
+            --arg login_user "$LOGIN_USER" \
+            --arg os "${{ inputs.os }}" \
+            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber), login_user:$login_user, os:$os}')
           curl -fsS -X POST "https://desktop.mnour.dev/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
@@ -276,7 +293,8 @@ jobs:
             echo "|---|---|"
             echo "| Username | \`${{ inputs.username }}\` |"
             echo "| Fresh start | \`${{ inputs.fresh }}\` |"
-            echo "| Instance | \`${{ inputs.instance_type }}\` |"
+            echo "| OS | \`${{ inputs.os }}\` |"
+            echo "| Instance | \`${{ inputs.os == 'windows' && inputs.instance_type_windows || inputs.instance_type }}\` |"
             echo ""
             echo "The password is NOT printed here - job logs are readable by anyone"
             echo "with repo access. Retrieve it with:"

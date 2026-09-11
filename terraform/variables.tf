@@ -182,6 +182,41 @@ variable "instance_type_gpu" {
   default     = "g4dn.xlarge"
 }
 
+variable "os" {
+  description = <<-EOT
+    Which desktop to run. "linux" (default) is the webtop/Selkies container,
+    unchanged. "windows" boots the baked Windows Server 2025 + Amazon DCV
+    image (Variant=windows) on instance_type_windows, streams DCV on 443
+    behind a Cloudflare-proxied hostname, and mounts the user's NTFS volume
+    as D:. Only valid with a username - the owner's own desktop is Linux.
+  EOT
+  type        = string
+  default     = "linux"
+  validation {
+    condition     = contains(["linux", "windows"], var.os)
+    error_message = "os must be \"linux\" or \"windows\"."
+  }
+}
+
+variable "instance_type_windows" {
+  description = <<-EOT
+    Used when os = windows. Windows' licence is priced per vCPU and spot does
+    not discount it, so 2 vCPU / 8GB (m6i.large, $0.103/hr spot in
+    ap-south-1 on 2026-09-11) is half the price of 4 vCPU / 8GB
+    (c7i.xlarge, $0.204). Whether 2 vCPU streams 1080p video acceptably is
+    the measured question - see the plan; change this default from that
+    measurement, not by guess.
+  EOT
+  type        = string
+  default     = "m6i.large"
+}
+
+variable "root_volume_gb_windows" {
+  description = "Root size when os = windows. The Server 2025 base is 30GB; Chrome, 7-Zip, VLC and updates need headroom. Disposable - nothing a user keeps lives on C:."
+  type        = number
+  default     = 50
+}
+
 variable "encoder" {
   description = "Software H.264, for a CPU instance. Ignored when gpu = true, which uses encoder_gpu instead."
   type        = string

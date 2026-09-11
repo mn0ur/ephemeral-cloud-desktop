@@ -98,7 +98,13 @@ function renderMine(s) {
     const persistLabel = session.can_persist
       ? `<label><input type="checkbox" id="persist"> Keep my files after destroy</label>`
       : "";
+    // Admin-only for now (server-enforced in /api/dispatch). Everyone else
+    // sees this card exactly as before: no hint that a second OS exists.
+    const osSelect = session.is_admin
+      ? `<label>Operating system <select id="os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>`
+      : "";
     box.innerHTML = `
+      ${osSelect}
       ${persistLabel}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
       ${dataBlock}`;
@@ -108,10 +114,12 @@ function renderMine(s) {
   }
 
   const running = mine.status === "active";
-  let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}`;
+  const isWin = mine.os === "windows";
+  let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}`;
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
-    html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * (s.hourly_usd || 0.0529)).toFixed(2)} this session</span>`;
+    const rate = isWin ? (s.hourly_usd_windows || 0.103) : (s.hourly_usd || 0.0529);
+    html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
   }
   if (mine.expires_at) {
     const left = mine.expires_at - Date.now() / 1000;
@@ -119,14 +127,18 @@ function renderMine(s) {
   }
   html += "</div>";
 
-  // Password only, deliberately - see loginUrl() above. The username still
-  // exists (Basic Auth needs one) but nobody using this page has to see,
-  // type, or copy it: the Open-desktop link already carries it.
-  const openUrl = loginUrl(mine.url, session.user_id, mine.password);
+  // Linux: Basic-Auth credentials ride in the URL (see loginUrl) so the link
+  // logs straight in. Windows: DCV has its own sign-in page and ignores URL
+  // credentials, so the link is plain and the card shows both fields.
+  const openUrl = isWin ? mine.url : loginUrl(mine.url, session.user_id, mine.password);
+  const loginUser = mine.login_user || session.user_id;
   html += `<div class="creds">
+      ${isWin ? `<div><span class="ck">username</span><span class="cv">${esc(loginUser)}</span><button type="button" class="copy-btn" data-copy="${esc(loginUser)}" title="Copy username">&#128203;</button></div>` : ""}
       ${mine.password
         ? `<div><span class="ck">password</span><span class="cv">${esc(mine.password)}</span><button type="button" class="copy-btn" data-copy="${esc(mine.password)}" title="Copy password">&#128203;</button></div>
-      <div class="sub" style="margin-top:.35rem">Opening the desktop below logs you straight in. Only copy this if it asks anyway, or you're opening it in a different browser.</div>`
+      <div class="sub" style="margin-top:.35rem">${isWin
+        ? "Windows asks for these on its sign-in page. First start takes a little longer while your files drive is prepared."
+        : "Opening the desktop below logs you straight in. Only copy this if it asks anyway, or you're opening it in a different browser."}</div>`
         : '<div class="sub">Password not recorded &mdash; this desktop was recovered rather than started normally.</div>'}
     </div>`;
 
@@ -174,7 +186,10 @@ async function copyToClipboard(btn) {
 
 async function go(action) {
   const body = { action };
-  if (action === "start") body.persist = $("persist")?.checked || false;
+  if (action === "start") {
+    body.persist = $("persist")?.checked || false;
+    body.os = $("os")?.value || "linux";
+  }
   if (action === "destroy" && !confirm("Destroy your desktop? Your files survive only if you chose to keep them.")) return;
   $("err").textContent = "";
   busy = true; pendingAction = action;
@@ -267,7 +282,10 @@ async function poll() {
       // The desktop was ready and the page appeared to do nothing at all.
       // Capture the refusal so the card below can show a real call to action.
       let opened = null;
-      try { opened = window.open(loginUrl(s.my_session.url, session?.user_id, s.my_session.password), "_blank", "noopener"); } catch { /* blocked */ }
+      const target = s.my_session.os === "windows"
+        ? s.my_session.url
+        : loginUrl(s.my_session.url, session?.user_id, s.my_session.password);
+      try { opened = window.open(target, "_blank", "noopener"); } catch { /* blocked */ }
       autoOpenBlocked = !opened;
     }
     if (!s.my_session) startedByMe = false;

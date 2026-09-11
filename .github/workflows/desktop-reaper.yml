@@ -84,7 +84,7 @@ jobs:
           # instance.
           ROWS=$(aws ec2 describe-instances --region "$AWS_REGION" \
             --filters "Name=tag:Role,Values=guest-desktop" "Name=instance-state-name,Values=running,pending" \
-            --query 'Reservations[].Instances[].[Tags[?Key==`Owner`]|[0].Value,LaunchTime]' \
+            --query 'Reservations[].Instances[].[Tags[?Key==`Owner`]|[0].Value,LaunchTime,Tags[?Key==`OS`]|[0].Value]' \
             --output text)
 
           if [ -z "$ROWS" ]; then
@@ -92,14 +92,15 @@ jobs:
             exit 0
           fi
 
-          echo "$ROWS" | while IFS=$'\t' read -r USERNAME LAUNCH_TIME; do
+          echo "$ROWS" | while IFS=$'\t' read -r USERNAME LAUNCH_TIME OS; do
             [ -z "$USERNAME" ] && continue
             [ "$USERNAME" = "None" ] && continue
             LAUNCH_S=$(date -u -d "$LAUNCH_TIME" +%s)
             AGE_S=$((NOW - LAUNCH_S))
+            if [ -z "$OS" ] || [ "$OS" = "None" ]; then OS=linux; fi
 
             if [ "$AGE_S" -ge "$LIMIT_S" ]; then
-              echo "$USERNAME: age ${AGE_S}s >= ${LIMIT_S}s limit - destroying"
+              echo "$USERNAME: age ${AGE_S}s >= ${LIMIT_S}s limit - destroying (os=$OS)"
               # -lock-timeout, not instant failure: this races a user clicking
               # Destroy on the very desktop being reaped, which is a wait-your-
               # turn situation, not an error.
@@ -112,7 +113,7 @@ jobs:
               # session, so the user loses the Destroy button for a machine that
               # is very much alive. A failure here is left for the next tick,
               # which will rediscover the same still-expired instance.
-              if TF_VAR_username="$USERNAME" terraform -chdir=terraform destroy \
+              if TF_VAR_username="$USERNAME" TF_VAR_os="$OS" terraform -chdir=terraform destroy \
                    -auto-approve -input=false -lock-timeout=180s; then
                 curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
                   -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \

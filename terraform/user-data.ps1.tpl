@@ -85,7 +85,15 @@ Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Syste
 $dcv = "Registry::HKEY_USERS\S-1-5-18\Software\GSettings\com\nicesoftware\dcv"
 Ensure-RegKey "$dcv\session-management\automatic-console-session"
 Set-ItemProperty "$dcv\session-management\automatic-console-session" "owner" $User -Type String
-Restart-Service dcvserver
-Write-Output "desktop-setup complete for $User (D: present: $HasD)"
+# DCV may still be in start-pending this early in boot. Retry, and make a
+# failure unmistakable in the transcript - without an owner the console
+# session cannot be logged into and the desktop looks up but is unusable.
+$restarted = $false
+for ($i = 1; $i -le 5 -and -not $restarted; $i++) {
+  try { Restart-Service dcvserver -ErrorAction Stop; $restarted = $true }
+  catch { Write-Output "dcvserver restart attempt $i failed: $($_.Exception.Message)"; Start-Sleep -Seconds 10 }
+}
+if (-not $restarted) { Write-Output "DESKTOP-SETUP-FAILED: dcvserver did not restart; console session owner not applied" }
+if ($restarted) { Write-Output "desktop-setup complete for $User (D: present: $HasD)" }
 Stop-Transcript
 </powershell>

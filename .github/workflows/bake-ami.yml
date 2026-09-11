@@ -14,6 +14,11 @@ on:
         description: "Bake the GPU variant: NVIDIA driver + container toolkit + DRM kernel args, built ON a g4dn so the driver is verified against a real T4. Produces Variant=gpu; leave false for the CPU AMI."
         type: boolean
         default: false
+      os:
+        description: "Which desktop to bake. linux (default) is the webtop/Selkies image; windows bakes Windows Server 2025 + Amazon DCV from scripts/bake-windows.ps1 and produces Variant=windows. gpu is ignored for windows in this pass."
+        type: choice
+        options: [linux, windows]
+        default: linux
 
 permissions:
   contents: read
@@ -40,6 +45,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Read the desktop image from terraform, the single source of truth
+        if: inputs.os != 'windows'
         run: |
           set -euo pipefail
           IMAGE=$(python3 - <<'PY'
@@ -66,7 +72,8 @@ jobs:
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
           echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
-      - name: Launch a throwaway instance in the default VPC
+      - name: Launch a throwaway instance in the default VPC (linux)
+        if: inputs.os != 'windows'
         run: |
           set -euo pipefail
           BASE_AMI=$(aws ec2 describe-images --owners 099720109477 \
@@ -182,7 +189,35 @@ jobs:
           echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
           aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
+      - name: Launch a throwaway instance in the default VPC (windows)
+        if: inputs.os == 'windows'
+        run: |
+          set -euo pipefail
+          # Latest AWS-published Server 2025 base, by name: no AMI IDs to
+          # hunt down on a region move.
+          BASE_AMI=$(aws ec2 describe-images --owners amazon \
+            --filters "Name=name,Values=Windows_Server-2025-English-Full-Base-*" "Name=state,Values=available" \
+            --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+          echo "base AMI: $BASE_AMI"
+          SUBNET=$(aws ec2 describe-subnets \
+            --filters "Name=default-for-az,Values=true" \
+            --query 'Subnets[0].SubnetId' --output text)
+
+          # On-demand, not spot: a bake that hangs on capacity helps nobody.
+          # m6i.large is the size the desktop will run on; ~$0.19/hr Windows
+          # on-demand, and a bake is ~30 minutes.
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "$BASE_AMI" --instance-type m6i.large \
+            --subnet-id "$SUBNET" --associate-public-ip-address \
+            --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=50,VolumeType=gp3,DeleteOnTermination=true}" \
+            --user-data file://scripts/bake-windows.ps1 \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ami-bake-temp-windows}]' \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+
       - name: Wait for the image pull to finish
+        if: inputs.os != 'windows'
         run: |
           # No SSM/instance-role on this throwaway box - poll console output
           # for the completion marker instead of anything requiring inbound
@@ -206,11 +241,36 @@ jobs:
             exit 1
           fi
 
+      - name: Wait for sysprep to shut the builder down (windows)
+        if: inputs.os == 'windows'
+        run: |
+          # The Windows bake ends with EC2Launch sysprep --shutdown, so
+          # "stopped" IS the completion signal - no console marker to grep.
+          # DCV + Chrome + 7-Zip + VLC + sysprep comfortably fits 30 minutes;
+          # 45 is the ceiling, after which something is wrong and snapshotting
+          # a half-provisioned image would only move the failure to every boot.
+          for i in $(seq 1 90); do
+            STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+              --query 'Reservations[0].Instances[0].State.Name' --output text)
+            echo "$(date -u +%H:%M:%S) builder is $STATE"
+            if [ "$STATE" = "stopped" ]; then break; fi
+            if [ "$STATE" = "terminated" ]; then echo "::error::builder terminated before sysprep finished"; exit 1; fi
+            sleep 30
+          done
+          if [ "$STATE" != "stopped" ]; then
+            echo "::error::builder did not reach stopped within 45 minutes - refusing to snapshot"
+            exit 1
+          fi
+
       - name: Snapshot into an AMI
         run: |
           set -euo pipefail
           STAMP=$(date -u +%Y%m%d%H%M%S)
-          VARIANT=$([ "${{ inputs.gpu }}" = "true" ] && echo gpu || echo cpu)
+          if [ "${{ inputs.os }}" = "windows" ]; then
+            VARIANT=windows
+          else
+            VARIANT=$([ "${{ inputs.gpu }}" = "true" ] && echo gpu || echo cpu)
+          fi
           AMI_ID=$(aws ec2 create-image \
             --instance-id "$INSTANCE_ID" \
             --name "ephemeral-desktop-baked-$VARIANT-$STAMP" \

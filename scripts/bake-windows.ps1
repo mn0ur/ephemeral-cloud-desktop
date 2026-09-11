@@ -22,6 +22,14 @@ function Write-Console([string]$Message) {
   } catch { Write-Output "console write failed: $_" }
 }
 
+# New-Item -Force on a registry key that ALREADY exists throws "Cannot delete a
+# subkey tree because the subkey does not exist" (PowerShell registry-provider
+# quirk; it tries to recreate the key). ServerManager pre-exists on Server 2025
+# and killed the first three bakes. Create only when absent.
+function Ensure-RegKey([string]$Path) {
+  if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+}
+
 function Get-File($Url, $Out) {
   Invoke-WebRequest -Uri $Url -OutFile $Out -UseBasicParsing
 }
@@ -43,7 +51,7 @@ try {
   Write-Console "phase: dcv config"
   $dcv = "Registry::HKEY_USERS\S-1-5-18\Software\GSettings\com\nicesoftware\dcv"
   foreach ($k in "session-management", "session-management\automatic-console-session", "security", "connectivity") {
-    New-Item -Path "$dcv\$k" -Force | Out-Null
+    Ensure-RegKey "$dcv\$k"
   }
   Set-ItemProperty "$dcv\session-management" "create-session" 1 -Type DWord
   Set-ItemProperty "$dcv\security" "authentication" "system" -Type String
@@ -57,7 +65,7 @@ try {
   # 2. Make a Server install feel like a desktop.
   # ---------------------------------------------------------------------------
   Write-Console "phase: desktop feel"
-  New-Item -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Force | Out-Null
+  Ensure-RegKey "HKLM:\SOFTWARE\Microsoft\ServerManager"
   Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\ServerManager" "DoNotOpenServerManagerAtLogon" 1 -Type DWord
   foreach ($g in "{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}", "{A509B1A8-37EF-4b3f-8CFC-4F3A74704073}") {
     $p = "HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\$g"
@@ -67,7 +75,7 @@ try {
 
   # Windows Update may install, never reboot under a logged-on user - a session
   # vanishing mid-work is worse than a pending patch.
-  New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force | Out-Null
+  Ensure-RegKey "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
   Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" "NoAutoRebootWithLoggedOnUsers" 1 -Type DWord
 
   # Password complexity OFF. desktop-up.yml stores each user's password as 32
@@ -91,7 +99,7 @@ try {
   # the instance. ${user_name} is expanded by Chrome, not by us. user-data
   # removes this policy on a session that has no D: (persist=false), otherwise
   # Chrome would refuse to start.
-  New-Item -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Force | Out-Null
+  Ensure-RegKey "HKLM:\SOFTWARE\Policies\Google\Chrome"
   Set-ItemProperty "HKLM:\SOFTWARE\Policies\Google\Chrome" "UserDataDir" 'D:\Profiles\Chrome\${user_name}' -Type String
 
   Write-Console "phase: 7zip"

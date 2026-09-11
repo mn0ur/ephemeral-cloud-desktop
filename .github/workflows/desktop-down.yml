@@ -15,6 +15,11 @@ on:
         description: "Must MATCH what the desktop was started with. Terraform needs the same value to destroy the Access apps it created, and to leave the DNS record's proxied flag alone on teardown."
         type: boolean
         default: false
+      os:
+        description: "Which OS this session runs. Terraform must evaluate the same variant it applied; the panel sends the session's recorded os."
+        type: choice
+        options: [linux, windows]
+        default: linux
 
 permissions:
   contents: read
@@ -94,6 +99,7 @@ jobs:
           TF_VAR_username: ${{ inputs.guest_username }}
           TF_VAR_cloudflare_dns_api_token: ${{ inputs.guest_username != '' && secrets.CLOUDFLARE_API_TOKEN || '' }}
           TF_VAR_enable_access: ${{ inputs.enable_access }}
+          TF_VAR_os: ${{ inputs.os }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then

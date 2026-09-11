@@ -91,7 +91,7 @@ export default async function handler(req, res) {
     }
     if (!sessions[target]) return res.status(404).json({ error: "no such session" });
     try {
-      await dispatch(workflow, { confirm: "DESTROY", guest_username: target });
+      await dispatch(workflow, { confirm: "DESTROY", guest_username: target, os: sessions[target]?.os || "linux" });
     } catch (e) {
       return res.status(e.status || 500).json({ error: e.message });
     }

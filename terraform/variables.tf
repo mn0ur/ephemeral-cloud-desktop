@@ -189,6 +189,8 @@ variable "os" {
     image (Variant=windows) on instance_type_windows, streams DCV on 443
     behind a Cloudflare-proxied hostname, and mounts the user's NTFS volume
     as D:. Only valid with a username - the owner's own desktop is Linux.
+    A windows session's hostname is single-label - <username>-desktop.<zone>,
+    not <username>.desktop.<zone> - see effective_hostname in main.tf.
   EOT
   type        = string
   default     = "linux"
@@ -341,7 +343,9 @@ variable "username" {
   description = <<-EOT
     "" (default): the owner's own desktop, desk.mnour.dev - unchanged.
 
-    Anything else: a per-user desktop at <username>.desktop.mnour.dev. Must
+    Anything else: a per-user desktop at <username>.desktop.mnour.dev (a
+    Windows session instead uses <username>-desktop.mnour.dev, single-label
+    under the zone - see effective_hostname in main.tf). Must
     be a single valid DNS label - lowercase letters, digits, hyphens, no
     leading/trailing hyphen, 63 chars max. The control panel derives this
     from the Google account's email local part (with a numeric suffix on

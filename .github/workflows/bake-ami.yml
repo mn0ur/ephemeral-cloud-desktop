@@ -292,6 +292,17 @@ jobs:
           echo "## AMI baked" >> "$GITHUB_STEP_SUMMARY"
           echo "$AMI_ID, tagged Project=ephemeral-desktop" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Keep the builder for forensics (on failure)
+        if: failure() && env.INSTANCE_ID != ''
+        run: |
+          set -uo pipefail
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text)
+          [ "$STATE" = "running" ] && aws ec2 stop-instances --instance-ids "$INSTANCE_ID" >/dev/null && echo "stopping $INSTANCE_ID"
+          VOL=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' --output text)
+          echo "::warning::builder $INSTANCE_ID kept STOPPED for forensics (root volume $VOL, ~\$4/month until deleted). Read C:\\bake.log by attaching $VOL to a Linux instance. Terminate the builder by hand when done."
+          echo "## Bake FAILED - builder kept for forensics" >> "$GITHUB_STEP_SUMMARY"
+          echo "instance \`$INSTANCE_ID\`, root volume \`$VOL\`. Read \`C:\\bake.log\` from the volume, then terminate the builder." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Terminate the throwaway instance
-        if: always()
+        if: success()
         run: aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" || true

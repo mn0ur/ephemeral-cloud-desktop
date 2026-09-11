@@ -114,6 +114,7 @@ try {
   Write-Console "BAKE-COMPLETE"
 } catch {
   Write-Console "BAKE-FAILED: $($_.Exception.Message) at $($_.InvocationInfo.ScriptLineNumber)"
+  "$($_.Exception.Message)`n$($_.ScriptStackTrace)" | Set-Content C:\bake-error.txt
   Stop-Transcript
   Stop-Computer -Force
   exit 1

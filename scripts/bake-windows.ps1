@@ -124,7 +124,9 @@ try {
   Write-Console "BAKE-FAILED: $($_.Exception.Message) at $($_.InvocationInfo.ScriptLineNumber)"
   "$($_.Exception.Message)`n$($_.ScriptStackTrace)" | Set-Content C:\bake-error.txt
   Stop-Transcript
-  Stop-Computer -Force
+  # A failed bake stays RUNNING on purpose: the workflow's ceiling catches it
+  # and keeps the builder for forensics. Only a successful sysprep stops the
+  # machine, so "stopped" unambiguously means the bake succeeded.
   exit 1
 }
 

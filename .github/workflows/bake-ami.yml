@@ -247,10 +247,10 @@ jobs:
           set -euo pipefail
           # The Windows bake ends with EC2Launch sysprep --shutdown, so
           # "stopped" IS the completion signal - no console marker to grep.
-          # DCV + Chrome + 7-Zip + VLC + sysprep comfortably fits 30 minutes;
-          # 45 is the ceiling, after which something is wrong and snapshotting
-          # a half-provisioned image would only move the failure to every boot.
-          for i in $(seq 1 90); do
+          # A healthy Windows bake reaches "stopped" in ~5 minutes (measured
+          # 2026-09-11, run 34580578499). A failed bake stays running by
+          # design, so 20 minutes is a generous ceiling, not a race.
+          for i in $(seq 1 40); do
             STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
               --query 'Reservations[0].Instances[0].State.Name' --output text)
             echo "$(date -u +%H:%M:%S) builder is $STATE"
@@ -265,11 +265,7 @@ jobs:
             sleep 30
           done
           if [ "$STATE" != "stopped" ]; then
-            echo "::error::builder did not reach stopped within 45 minutes - refusing to snapshot"
-            exit 1
-          fi
-          if ! echo "$OUT" | grep -q 'BAKE-COMPLETE'; then
-            echo "::error::builder stopped without a BAKE-COMPLETE marker - refusing to snapshot"
+            echo "::error::builder did not reach stopped within 20 minutes - refusing to snapshot"
             exit 1
           fi
 

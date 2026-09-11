@@ -18,6 +18,21 @@
 
 locals {
   access_enabled = var.enable_access && var.username != "" && var.owner_email != ""
+
+  windows = var.os == "windows"
+
+  # A Windows hostname is ALWAYS proxied: DCV presents a self-signed
+  # certificate and the browser must see Cloudflare's trusted one instead.
+  # (Zone SSL mode must be "Full" - not "Full (strict)" - for that to work.)
+  # Proxied also means the security group only admits Cloudflare's edge, so
+  # a Windows desktop is unreachable by direct IP. Linux keeps following
+  # access_enabled exactly as before.
+  proxied = local.access_enabled || local.windows
+
+  # Windows local account names are limited to 20 characters; the panel
+  # username (an email local part) is already a valid DNS label, which
+  # satisfies the character rules, but not the length.
+  windows_user = substr(var.web_user, 0, 20)
 }
 
 # /healthz must stay reachable WITHOUT authentication. The reaper and any

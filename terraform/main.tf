@@ -145,7 +145,7 @@ resource "aws_security_group" "session_access" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "https_open" {
-  count = local.access_enabled ? 0 : 1
+  count = local.proxied ? 0 : 1
 
   security_group_id = aws_security_group.session_access.id
   cidr_ipv4         = "0.0.0.0/0"
@@ -161,10 +161,10 @@ resource "aws_vpc_security_group_egress_rule" "session_access_all" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
-  for_each = local.access_enabled ? toset(data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks) : toset([])
+  for_each = local.proxied ? toset(data.cloudflare_ip_ranges.cloudflare.ipv4_cidr_blocks) : toset([])
 
   security_group_id = aws_security_group.session_access.id
-  description       = "webtop UI via Caddy - Cloudflare edge only (Access enforced there)"
+  description       = "desktop UI - Cloudflare edge only (proxied hostname)"
   cidr_ipv4         = each.value
   from_port         = 443
   to_port           = 443
@@ -291,7 +291,7 @@ data "aws_ami" "desktop" {
   # anyway - are both failures that only show up as "it feels slow".
   filter {
     name   = "tag:Variant"
-    values = [var.gpu ? "gpu" : "cpu"]
+    values = [local.windows ? (var.gpu ? "windows-gpu" : "windows") : (var.gpu ? "gpu" : "cpu")]
   }
 
   # A bake that failed partway can leave an AMI behind in a non-usable state;
@@ -304,7 +304,7 @@ data "aws_ami" "desktop" {
 
 resource "aws_instance" "desktop" {
   ami           = data.aws_ami.desktop.id
-  instance_type = var.gpu ? var.instance_type_gpu : var.instance_type
+  instance_type = local.windows ? var.instance_type_windows : (var.gpu ? var.instance_type_gpu : var.instance_type)
   subnet_id     = data.terraform_remote_state.network.outputs.subnet_id
   vpc_security_group_ids = [
     data.terraform_remote_state.network.outputs.security_group_id,
@@ -322,7 +322,13 @@ resource "aws_instance" "desktop" {
   # user data automatically, and a shell script compresses ~2.7x (18KB ->
   # 6.9KB), so this keeps every hard-won comment in the script instead of
   # deleting documentation to buy back bytes.
-  user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tpl", {
+  # Windows: plain base64, not gzip - EC2Launch v2 does not reliably unpack
+  # gzipped user-data, and the PowerShell script is a few KB. Linux keeps
+  # base64gzip for the reason in the comment above.
+  user_data_base64 = local.windows ? base64encode(templatefile("${path.module}/user-data.ps1.tpl", {
+    username = local.windows_user
+    password = local.web_password
+    })) : base64gzip(templatefile("${path.module}/user-data.sh.tpl", {
     hostname                 = local.effective_hostname
     image                    = var.image
     timezone                 = var.timezone
@@ -344,7 +350,7 @@ resource "aws_instance" "desktop" {
   }))
 
   root_block_device {
-    volume_size           = var.gpu ? var.root_volume_gb_gpu : var.root_volume_gb
+    volume_size           = local.windows ? var.root_volume_gb_windows : (var.gpu ? var.root_volume_gb_gpu : var.root_volume_gb)
     volume_type           = "gp3"
     encrypted             = true
     delete_on_termination = true
@@ -353,6 +359,13 @@ resource "aws_instance" "desktop" {
   metadata_options {
     http_tokens   = "required" # IMDSv2 only
     http_endpoint = "enabled"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !local.windows || var.username != ""
+      error_message = "os=windows requires a username. The owner's own desktop is Linux-only."
+    }
   }
 
   # Spot when available. Set use_spot=false to fall back to on-demand.
@@ -380,6 +393,7 @@ resource "aws_instance" "desktop" {
       Owner      = var.username
       OwnerEmail = var.owner_email
       Role       = var.is_guest ? "guest-desktop" : "user-desktop"
+      OS         = var.os
     } : {},
   )
 }
@@ -444,7 +458,7 @@ resource "null_resource" "dns" {
     # Access can only gate a PROXIED hostname, so the record's proxy setting
     # has to follow enable_access. Kept in triggers because destroy-time
     # provisioners may only reference self.triggers.
-    proxied = local.access_enabled ? "true" : "false"
+    proxied = local.proxied ? "true" : "false"
   }
 
   provisioner "local-exec" {

@@ -1,7 +1,8 @@
 <powershell>
 # One-time provisioning of the Windows desktop image. Runs as SYSTEM under
-# EC2Launch v2 on a throwaway builder; ends by sysprepping and SHUTTING DOWN,
-# and the stopped state is the completion signal bake-ami.yml waits for.
+# EC2Launch v2 on a throwaway builder; ends by resetting EC2Launch (no
+# sysprep - see section 4) and SHUTTING DOWN, and the stopped state is the
+# completion signal bake-ami.yml waits for.
 #
 # Nothing user-specific belongs here - no accounts, no passwords, no D:.
 # Those are per launch, in terraform/user-data.ps1.tpl.
@@ -133,16 +134,28 @@ try {
   "$($_.Exception.Message)`n$($_.ScriptStackTrace)" | Set-Content C:\bake-error.txt
   Stop-Transcript
   # A failed bake stays RUNNING on purpose: the workflow's ceiling catches it
-  # and keeps the builder for forensics. Only a successful sysprep stops the
-  # machine, so "stopped" unambiguously means the bake succeeded.
+  # and keeps the builder for forensics. Only a successful run reaches the
+  # shutdown in section 4, so "stopped" unambiguously means the bake succeeded.
   exit 1
 }
 
 # ---------------------------------------------------------------------------
-# 4. Sysprep + shutdown. Without sysprep every launch would clone this
-#    machine's identity and EC2Launch would not run user-data on first boot.
+# 4. Reset EC2Launch and shut down - deliberately NO sysprep.
+#
+#    Every sysprepped image of this script produced a DCV server that died
+#    while loading its display modules on first boot ("Could not setup idd
+#    system pipeline" - DCV's virtual display driver), so 443 never opened;
+#    the same image contents installed live on a running machine worked.
+#    Sysprep's specialize pass re-enumerates devices and loses that driver.
+#
+#    `EC2Launch.exe reset` deletes the agent's state so its one-time tasks -
+#    user-data, the Administrator password - run again on the next boot,
+#    which is the only reason sysprep was wanted. A duplicated machine SID is
+#    irrelevant for standalone (non-domain) desktops. Stop-Computer is the
+#    documented no-sysprep shutdown; "stopped" stays the completion signal.
 # ---------------------------------------------------------------------------
-Write-Console "phase: sysprep"
+Write-Console "phase: ec2launch reset + shutdown"
 Stop-Transcript
-& "$env:ProgramFiles\Amazon\EC2Launch\EC2Launch.exe" sysprep --shutdown=true
+& "$env:ProgramFiles\Amazon\EC2Launch\EC2Launch.exe" reset --clean
+Stop-Computer -Force
 </powershell>

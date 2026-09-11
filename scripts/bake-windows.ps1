@@ -61,6 +61,14 @@ try {
   Set-ItemProperty "$dcv\connectivity" "web-port" 443 -Type DWord
   New-NetFirewallRule -DisplayName "DCV web 443" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
 
+  # Manual, not Automatic: the panel treats "443 answers" as "desktop ready".
+  # If DCV came up with the image it would answer BEFORE user-data has created
+  # the account and handed over the console session, and the user's first
+  # sign-in would be rejected. user-data starts the service as its LAST step,
+  # so the port stays closed until the desktop is actually usable.
+  Set-Service dcvserver -StartupType Manual
+  Stop-Service dcvserver -Force -ErrorAction SilentlyContinue
+
   # ---------------------------------------------------------------------------
   # 2. Make a Server install feel like a desktop.
   # ---------------------------------------------------------------------------

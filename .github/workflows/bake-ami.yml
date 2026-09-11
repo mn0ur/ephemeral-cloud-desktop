@@ -285,6 +285,7 @@ jobs:
             --query ImageId --output text)
           echo "baked AMI: $AMI_ID - waiting for it to become available"
           aws ec2 wait image-available --image-ids "$AMI_ID"
+          echo "AMI_ID=$AMI_ID" >> "$GITHUB_ENV"
           echo "## AMI baked" >> "$GITHUB_STEP_SUMMARY"
           echo "$AMI_ID, tagged Project=ephemeral-desktop" >> "$GITHUB_STEP_SUMMARY"
 
@@ -315,6 +316,68 @@ jobs:
             echo "::warning::linux bake failed/cancelled - builder $INSTANCE_ID terminated (no forensics kept for linux)"
             echo "## Bake FAILED - builder terminated (linux, no forensics needed)" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Smoke-test the Windows AMI (DCV must answer on 443)
+        if: inputs.os == 'windows'
+        run: |
+          set -euo pipefail
+          # An image that boots but never starts DCV looks identical to a good
+          # one until a user is staring at "Booting..." forever - three such
+          # images shipped on 2026-09-11. Launch the AMI once with the smallest
+          # possible user-data (start DCV as user-data will), wait for 443, and
+          # only then let the tag stand. Failure deregisters the AMI so
+          # Terraform's most_recent can never pick it.
+          SUBNET=$(aws ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query 'Subnets[0].SubnetId' --output text)
+          VPC=$(aws ec2 describe-subnets --subnet-ids "$SUBNET" --query 'Subnets[0].VpcId' --output text)
+          SG=$(aws ec2 create-security-group --group-name "ami-smoke-$AMI_ID" --description "temporary: AMI smoke test, 443 from the runner" --vpc-id "$VPC" --query GroupId --output text)
+          echo "SMOKE_SG=$SG" >> "$GITHUB_ENV"
+          RUNNER_IP=$(curl -s https://checkip.amazonaws.com)
+          aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 443 --cidr "$RUNNER_IP/32" >/dev/null
+          cat > smoke-user-data.ps1 <<'EOF'
+          <powershell>
+          $dcv = "Registry::HKEY_USERS\S-1-5-18\Software\GSettings\com\nicesoftware\dcv"
+          if (-not (Test-Path "$dcv\session-management\automatic-console-session")) { New-Item -Path "$dcv\session-management\automatic-console-session" -Force | Out-Null }
+          Set-ItemProperty "$dcv\session-management\automatic-console-session" "owner" "Administrator" -Type String
+          Set-Service dcvserver -StartupType Automatic
+          Start-Service dcvserver
+          </powershell>
+          EOF
+          SMOKE_ID=$(aws ec2 run-instances --image-id "$AMI_ID" --instance-type m6i.large \
+            --subnet-id "$SUBNET" --security-group-ids "$SG" --associate-public-ip-address \
+            --metadata-options "HttpTokens=required,HttpEndpoint=enabled" \
+            --user-data file://smoke-user-data.ps1 \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ami-smoke-test}]' \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "SMOKE_ID=$SMOKE_ID" >> "$GITHUB_ENV"
+          aws ec2 wait instance-running --instance-ids "$SMOKE_ID"
+          IP=$(aws ec2 describe-instances --instance-ids "$SMOKE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          # Sysprepped first boot + DCV start: ~5-7 minutes on m6i.large. 15 is the ceiling.
+          OK=0
+          for i in $(seq 1 45); do
+            CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "https://$IP/" || true)
+            echo "$(date -u +%H:%M:%S) DCV https://$IP/ -> $CODE"
+            if [ "$CODE" = "200" ]; then OK=1; break; fi
+            sleep 20
+          done
+          if [ "$OK" -ne 1 ]; then
+            echo "::error::DCV never answered on 443 from $AMI_ID - deregistering the image so it cannot be launched"
+            SNAP=$(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].BlockDeviceMappings[0].Ebs.SnapshotId' --output text)
+            aws ec2 deregister-image --image-id "$AMI_ID"
+            [ -n "$SNAP" ] && [ "$SNAP" != "None" ] && aws ec2 delete-snapshot --snapshot-id "$SNAP" || true
+            # Keep the smoke instance STOPPED for forensics (same policy as a failed bake).
+            aws ec2 stop-instances --instance-ids "$SMOKE_ID" >/dev/null || true
+            echo "::warning::smoke instance $SMOKE_ID kept stopped for forensics; security group $SG left in place - delete both by hand"
+            exit 1
+          fi
+          echo "## AMI verified" >> "$GITHUB_STEP_SUMMARY"
+          echo "$AMI_ID answered DCV on 443 within the smoke test" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up the smoke test (on success)
+        if: inputs.os == 'windows' && success()
+        run: |
+          aws ec2 terminate-instances --instance-ids "$SMOKE_ID" >/dev/null || true
+          aws ec2 wait instance-terminated --instance-ids "$SMOKE_ID" || true
+          aws ec2 delete-security-group --group-id "$SMOKE_SG" || true
 
       - name: Terminate the throwaway instance
         if: success()

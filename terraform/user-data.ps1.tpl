@@ -55,11 +55,29 @@ try {
   Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.Number -ne 0 } | ForEach-Object {
     Write-Output "initialising fresh data disk $($_.Number)"
     Initialize-Disk -Number $_.Number -PartitionStyle GPT -PassThru |
-      New-Partition -DriveLetter D -UseMaximumSize |
+      New-Partition -AssignDriveLetter -UseMaximumSize |
       Format-Volume -FileSystem NTFS -NewFileSystemLabel "UserData" -Confirm:$false | Out-Null
   }
-  Get-Partition | Where-Object { $_.DiskNumber -ne 0 -and $_.Size -gt 1GB -and -not $_.DriveLetter -and $_.Type -ne 'Reserved' } |
-    ForEach-Object { Write-Output "reattaching existing data disk"; $_ | Set-Partition -NewDriveLetter D }
+
+  # Find our volume by its label wherever Windows put it, and move it to D:.
+  # Windows auto-assigns the next free letter to a returning NTFS volume, and
+  # D: is often already taken (the EC2 DVD device) - assuming D: is free left
+  # a real launch with no D:\ at all (2026-09-11), so the folder redirection
+  # and the diagnostics silently did nothing.
+  $vol = Get-Volume -FileSystemLabel "UserData" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($vol) {
+    if ($vol.DriveLetter -ne 'D') {
+      $taken = Get-Volume -DriveLetter D -ErrorAction SilentlyContinue
+      if ($taken) {
+        # Evict whatever holds D: (a DVD device, typically) to the next free letter.
+        $free = [char[]](69..90) | Where-Object { -not (Get-Volume -DriveLetter $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1
+        Get-Partition -DriveLetter D -ErrorAction SilentlyContinue | Set-Partition -NewDriveLetter $free -ErrorAction SilentlyContinue
+        Get-CimInstance Win32_Volume -Filter "DriveLetter='D:'" -ErrorAction SilentlyContinue | Set-CimInstance -Property @{DriveLetter="$($free):"} -ErrorAction SilentlyContinue
+      }
+      $vol | Get-Partition | Set-Partition -NewDriveLetter D
+      Write-Output "data volume moved from $($vol.DriveLetter): to D:"
+    } else { Write-Output "data volume already at D:" }
+  } else { Write-Output "no UserData volume found (fully ephemeral session, or first-boot format failed)" }
 
   $HasD = Test-Path "D:\"
   if ($HasD) {

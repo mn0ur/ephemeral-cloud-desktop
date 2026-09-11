@@ -15,6 +15,28 @@ Start-Transcript -Path C:\desktop-setup.log -Append
 function Ensure-RegKey([string]$Path) {
   if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
 }
+
+# Every exit path leaves its evidence on the user's volume. C: dies with the
+# instance and there is no SSM/RDP/key pair, so D: is the only place a
+# failed launch can be diagnosed from (the first real Windows start failed in
+# the DCV start step and left nothing readable, 2026-09-11).
+function Save-Diagnostics([string]$Reason) {
+  if (-not (Test-Path "D:\")) { return }
+  try {
+    $dir = "D:\.desktop-diagnostics\$(Get-Date -Format yyyyMMdd-HHmmss)-$Reason"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    try { Stop-Transcript | Out-Null } catch {}
+    Copy-Item C:\desktop-setup.log "$dir\desktop-setup.log" -ErrorAction SilentlyContinue
+    Copy-Item C:\ProgramData\NICE\dcv\log\*.log $dir -ErrorAction SilentlyContinue
+    Get-Service dcvserver -ErrorAction SilentlyContinue | Format-List * | Out-File "$dir\dcvserver-service.txt"
+    Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 40 -ErrorAction SilentlyContinue |
+      Where-Object { $_.Message -match 'dcv' } | Format-List TimeCreated, Id, Message | Out-File "$dir\scm-dcv-events.txt"
+    Get-WinEvent -LogName Application -MaxEvents 60 -ErrorAction SilentlyContinue |
+      Where-Object { $_.ProviderName -match 'dcv' -or $_.Message -match 'dcv' } | Format-List TimeCreated, ProviderName, Id, Message | Out-File "$dir\application-dcv-events.txt"
+    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress, LocalPort, OwningProcess | Out-File "$dir\listeners.txt"
+    (Invoke-RestMethod -Method PUT -Uri 'http://169.254.169.254/latest/api/token' -Headers @{'X-aws-ec2-metadata-token-ttl-seconds'='60'} -TimeoutSec 5 -ErrorAction SilentlyContinue) | Out-File "$dir\imdsv2-token-ok.txt"
+  } catch { "diagnostics failed: $($_.Exception.Message)" | Out-File "D:\.desktop-diagnostics-error.txt" -Append }
+}
 $User = '${username}'
 $Pass = '${password}'
 
@@ -96,7 +118,8 @@ try {
   Set-Content -Path C:\desktop-setup-FAILED.txt -Value $msg
   if (Test-Path D:\) { Set-Content -Path D:\desktop-setup-FAILED.txt -Value $msg }
   Write-Output "DESKTOP-SETUP-FAILED: $($_.Exception.Message)"
-  Stop-Transcript
+  try { Stop-Transcript } catch {}
+  Save-Diagnostics "exception"
   exit 1
 }
 
@@ -114,11 +137,15 @@ Set-Service dcvserver -StartupType Automatic
 # running the console session cannot be logged into and the desktop looks
 # up but is unusable.
 $restarted = $false
-for ($i = 1; $i -le 5 -and -not $restarted; $i++) {
+for ($i = 1; $i -le 8 -and -not $restarted; $i++) {
   try { Start-Service dcvserver -ErrorAction Stop; $restarted = $true }
-  catch { Write-Output "dcvserver start attempt $i failed: $($_.Exception.Message)"; Start-Sleep -Seconds 10 }
+  catch {
+    Write-Output "dcvserver start attempt $i failed: $($_.Exception.Message)"
+    Write-Output "dcvserver status after attempt $i: $((Get-Service dcvserver -ErrorAction SilentlyContinue).Status)"
+    Start-Sleep -Seconds 15
+  }
 }
 if (-not $restarted) { Write-Output "DESKTOP-SETUP-FAILED: dcvserver did not start; console session owner not applied" }
 if ($restarted) { Write-Output "desktop-setup complete for $User (D: present: $HasD)" }
-Stop-Transcript
+if ($restarted) { Save-Diagnostics "ok" } else { Save-Diagnostics "dcv-start-failed" }
 </powershell>

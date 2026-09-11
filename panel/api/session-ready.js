@@ -23,15 +23,20 @@ export default async function handler(req, res) {
   const launchedAt = Number(req.body?.launched_at);
   const startedAt = Number.isFinite(launchedAt) && launchedAt > 0 ? launchedAt : Date.now() / 1000;
   const isGuest = Boolean(prior.is_guest);
+  // os was decided at dispatch from a verified session; the callback's value
+  // is only a fallback for a session with no prior state (redeploy mid-run).
+  const os = prior.os || (req.body?.os === "windows" ? "windows" : "linux");
   await putSession(username, {
-    status: "ready", // the page polls /healthz before calling it active
+    status: "ready", // the page polls the per-OS probe before calling it active
     email,
     url: req.body?.url || null,
     password: req.body?.password || null,
+    login_user: req.body?.login_user || null,
     started_at: startedAt,
     is_guest: isGuest,
+    os,
     ...(isGuest ? { expires_at: startedAt + (await getGuestLimitMinutes()) * 60 } : {}),
   });
-  await logEvent("start", { username, email, url: req.body?.url });
+  await logEvent("start", { username, email, url: req.body?.url, os });
   return res.status(200).json({ ok: true });
 }

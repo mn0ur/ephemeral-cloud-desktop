@@ -77,6 +77,7 @@ jobs:
           USER="${{ inputs.guest_username }}"
 
           DELETED=0
+          BLOCKED=""
           # Both roles: "delete my data" means all of it. Same tag pair the
           # start workflow uses, so this can only match this user's desktop
           # data volumes - never the owner's, the hub's, or a root disk.
@@ -90,10 +91,13 @@ jobs:
             fi
             echo "$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
             # Refuse while attached: deleting under a running desktop corrupts
-            # whatever is mid-write, and AWS rejects it anyway.
+            # whatever is mid-write, and AWS rejects it anyway. Record it and
+            # keep going - one attached role must not strand the other role's
+            # volume or skip the data-wiped callback below.
             if [ "$STATE" != "available" ]; then
               echo "::error::Volume $VOL is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
-              exit 1
+              BLOCKED="$BLOCKED $ROLE:$VOL"
+              continue
             fi
             aws ec2 delete-volume --volume-id "$VOL"
             echo "deleted $VOL"
@@ -101,20 +105,27 @@ jobs:
             sleep 3
             if aws ec2 describe-volumes --volume-ids "$VOL" >/dev/null 2>&1; then
               echo "::warning::$VOL still visible - deletion may still be settling."
+            else
+              echo "confirmed: $VOL no longer exists"
             fi
           done
-          if [ "$DELETED" -eq 0 ]; then
+          if [ "$DELETED" -eq 0 ] && [ -z "$BLOCKED" ]; then
             echo "No saved data volumes for '$USER' - nothing to delete."
             echo "NOTHING_TO_DO=true" >> "$GITHUB_ENV"
             exit 0
           fi
 
-          if [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+          if [ "$DELETED" -gt 0 ] && [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
             curl -fsS -X POST "https://desktop.mnour.dev/api/data-wiped" \
               -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
               -d "{\"username\":\"$USER\"}" \
               || echo "::warning::callback failed - the panel may still offer to delete data that is already gone"
+          fi
+
+          if [ -n "$BLOCKED" ]; then
+            echo "::error::still attached, not deleted:$BLOCKED - destroy the desktop first, then delete the data"
+            exit 1
           fi
 
       - name: Summary

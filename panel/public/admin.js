@@ -19,7 +19,7 @@ function renderSessions(sessions) {
   for (const [uname, sess] of rows) {
     const row = document.createElement("div");
     row.className = "sess-row";
-    row.innerHTML = `<div><strong>${esc(uname)}</strong><div class="who">${esc(sess.email || "")} &middot; ${esc(sess.status)} &middot; ${esc(sess.os || "linux")}</div></div>`;
+    row.innerHTML = `<div><strong>${esc(uname)}</strong><div class="who">${esc(sess.email || "")} &middot; ${esc(sess.status)} &middot; ${esc(sess.os || "linux")} &middot; ${esc(sess.region || "ap-south-1")}</div></div>`;
     if (["active", "ready", "pending"].includes(sess.status)) {
       const b = document.createElement("button");
       b.className = "stop"; b.textContent = "Destroy";

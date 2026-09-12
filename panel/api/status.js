@@ -4,7 +4,7 @@ import {
 } from "../lib/state.js";
 import { runProgress, tokenConfigured } from "../lib/github.js";
 import {
-  refreshOwn, activeCount, MAX_CONCURRENT, HOURLY_USD, HOURLY_USD_WINDOWS, DESKTOP_DOMAIN,
+  refreshOwn, activeCount, MAX_CONCURRENT, HOURLY_USD, HOURLY_USD_WINDOWS, DESKTOP_DOMAIN, REGIONS,
 } from "../lib/desktops.js";
 
 export default async function handler(req, res) {
@@ -54,6 +54,7 @@ export default async function handler(req, res) {
     desktop_domain: DESKTOP_DOMAIN,
     hourly_usd: HOURLY_USD,
     hourly_usd_windows: HOURLY_USD_WINDOWS,
+    regions: REGIONS,
     // Two GitHub API calls - only when something is actually mid-flight. A
     // settled panel has nothing to report, and polling the Actions API every
     // few seconds forever would burn rate limit for no reason.

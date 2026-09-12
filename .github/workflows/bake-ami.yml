@@ -317,7 +317,7 @@ jobs:
             echo "## Bake FAILED - builder terminated (linux, no forensics needed)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Smoke-test the Windows AMI (DCV must answer on 443)
+      - name: Smoke-test the Windows AMI (DCV must answer on 8443)
         if: inputs.os == 'windows'
         run: |
           set -euo pipefail
@@ -332,7 +332,7 @@ jobs:
           SG=$(aws ec2 create-security-group --group-name "ami-smoke-$AMI_ID" --description "temporary: AMI smoke test, 443 from the runner" --vpc-id "$VPC" --query GroupId --output text)
           echo "SMOKE_SG=$SG" >> "$GITHUB_ENV"
           RUNNER_IP=$(curl -s https://checkip.amazonaws.com)
-          aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 443 --cidr "$RUNNER_IP/32" >/dev/null
+          aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 8443 --cidr "$RUNNER_IP/32" >/dev/null
           cat > smoke-user-data.ps1 <<'EOF'
           <powershell>
           $dcv = "Registry::HKEY_USERS\S-1-5-18\Software\GSettings\com\nicesoftware\dcv"
@@ -354,8 +354,8 @@ jobs:
           # Sysprepped first boot + DCV start: ~5-7 minutes on m6i.large. 15 is the ceiling.
           OK=0
           for i in $(seq 1 45); do
-            CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "https://$IP/" || true)
-            echo "$(date -u +%H:%M:%S) DCV https://$IP/ -> $CODE"
+            CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 8 "https://$IP:8443/" || true)
+            echo "$(date -u +%H:%M:%S) DCV https://$IP:8443/ -> $CODE"
             if [ "$CODE" = "200" ]; then OK=1; break; fi
             sleep 20
           done

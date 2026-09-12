@@ -56,20 +56,16 @@ try {
   }
   Set-ItemProperty "$dcv\session-management" "create-session" 1 -Type DWord
   Set-ItemProperty "$dcv\security" "authentication" "system" -Type String
-  # 443, not DCV's default 8443: the existing security-group rules, URL shape
-  # and Cloudflare proxying all assume 443. Nothing else listens there on a
-  # fresh Server install.
-  Set-ItemProperty "$dcv\connectivity" "web-port" 443 -Type DWord
-  # No Indirect Display Driver. On this Server 2025 image dcvserver died while
-  # loading its display modules on every boot of a baked image ("Could not
-  # setup idd system pipeline 0x80070057"), so 443 never opened - four images
-  # in a row on 2026-09-11/12. Excluding 'idd' / 'fbreaderidd' makes DCV use
-  # Desktop Duplication + GDI, the normal mode for a GPU-less server. The
-  # values are DCV's list syntax stored as strings, per the documented fix.
-  Ensure-RegKey "$dcv\display"
-  Set-ItemProperty "$dcv\display" "layout-managers" "['nvapi', 'amd', 'dod', 'winapi']" -Type String
-  Set-ItemProperty "$dcv\display" "framebuffer-readers" "['desktopduplication', 'gdi']" -Type String
-  New-NetFirewallRule -DisplayName "DCV web 443" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
+  # 8443 - DCV's default - and NOT 443. DCV on Windows refuses 443 outright:
+  # "WARN service-endpoints - Invalid port 443, ignoring all endpoints" ->
+  # "Failed to create web sockets frontend service: No HTTP listen endpoints
+  # set", and the service never starts. That single setting killed every
+  # baked image on 2026-09-11 (sysprep, IDD and IMDSv2 were all blamed first).
+  # The user-facing URL stays :443 - a Cloudflare Origin Rule for
+  # *-desktop.<zone> routes proxied traffic to origin port 8443, and the
+  # session security group admits Cloudflare on 8443.
+  Set-ItemProperty "$dcv\connectivity" "web-port" 8443 -Type DWord
+  New-NetFirewallRule -DisplayName "DCV web 8443" -Direction Inbound -Protocol TCP -LocalPort 8443 -Action Allow | Out-Null
 
   # Manual, not Automatic: the panel treats "443 answers" as "desktop ready".
   # If DCV came up with the image it would answer BEFORE user-data has created
@@ -149,19 +145,15 @@ try {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Reset EC2Launch and shut down - deliberately NO sysprep.
+# 4. Reset EC2Launch and shut down - no sysprep.
 #
-#    Every sysprepped image of this script produced a DCV server that died
-#    while loading its display modules on first boot ("Could not setup idd
-#    system pipeline" - DCV's virtual display driver), so 443 never opened;
-#    the same image contents installed live on a running machine worked.
-#    Sysprep's specialize pass re-enumerates devices and loses that driver.
-#
-#    `EC2Launch.exe reset` deletes the agent's state so its one-time tasks -
-#    user-data, the Administrator password - run again on the next boot,
-#    which is the only reason sysprep was wanted. A duplicated machine SID is
-#    irrelevant for standalone (non-domain) desktops. Stop-Computer is the
-#    documented no-sysprep shutdown; "stopped" stays the completion signal.
+#    Sysprep was removed while hunting the "DCV never listens" failure (the
+#    real cause was web-port 443 - see the DCV block above) and is left out:
+#    `EC2Launch.exe reset` makes user-data and the Administrator password
+#    run again on the next boot, which is all sysprep was wanted for, and a
+#    duplicated machine SID is irrelevant for standalone (non-domain)
+#    desktops. Stop-Computer is the documented no-sysprep shutdown; "stopped"
+#    stays the completion signal.
 # ---------------------------------------------------------------------------
 Write-Console "phase: ec2launch reset + shutdown"
 Stop-Transcript

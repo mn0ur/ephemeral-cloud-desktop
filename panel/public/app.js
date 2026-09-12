@@ -45,6 +45,43 @@ let autoOpenBlocked = false;
 // so clearing busy early (see poll()) doesn't also skip the one auto-open.
 let startedByMe = false;
 
+
+// Measured, not guessed (2026-09-12/13, ap-south-1): Windows Start->ready
+// 186-189s, Linux ~325s, destroy 105-140s. The bar fills to 95% at the
+// expected time and then HOLDS with "taking longer" - it never claims 100%
+// before the real state change arrives from the poll.
+const EXPECTED_S = { linux: 330, windows: 200, destroy: 135 };
+// Client-side anchor for the moment we clicked, used until the server-side
+// timestamp (dispatched_at / destroy_dispatched_at) is on the session.
+let actionStartedAt = null;
+
+function barHtml(kind, startTs, extraClass = "") {
+  const total = EXPECTED_S[kind] || EXPECTED_S.linux;
+  const start = Number(startTs) || Date.now() / 1000;
+  return `<div class="bar-wrap ${extraClass}" data-bar="${kind}" data-start="${start}" data-total="${total}">
+      <div class="bar-track"><div class="bar-fill" style="width:0%"></div></div>
+      <div class="bar-meta"><span class="bar-label"></span><span class="bar-eta"></span></div>
+    </div>`;
+}
+
+function tickBars() {
+  const now = Date.now() / 1000;
+  document.querySelectorAll("[data-bar]").forEach((el) => {
+    const total = Number(el.dataset.total), elapsed = Math.max(0, now - Number(el.dataset.start));
+    const frac = Math.min(elapsed / total, 1);
+    const pct = elapsed >= total ? 95 : Math.round(frac * 95);
+    el.querySelector(".bar-fill").style.width = pct + "%";
+    const left = Math.ceil((total - elapsed) / 60);
+    const kind = el.dataset.bar;
+    const verb = kind === "destroy" ? "Shutting down" : "Setting up";
+    el.querySelector(".bar-label").textContent = elapsed >= total
+      ? `${verb} — taking a little longer than usual`
+      : `${verb} — usually about ${Math.round(total / 60)} min`;
+    el.querySelector(".bar-eta").textContent = elapsed >= total ? "" : (left <= 1 ? "under a minute left" : `about ${left} min left`);
+  });
+}
+setInterval(tickBars, 1000);
+
 function fmtDur(sec) {
   const m = Math.floor(sec / 60), h = Math.floor(m / 60);
   return h ? `${h}h ${m % 60}m` : `${m}m`;
@@ -80,7 +117,11 @@ function renderMine(s) {
       `<div><span class="dot work"></span> ${pendingAction === "destroy" ? "Destroying&hellip;" : "Starting&hellip;"}</div>` +
       `<div class="sub">${pendingAction === "destroy"
         ? "Terminating the instance. Your files are kept if you chose to keep them."
-        : "This takes a few minutes."}</div>` + stepsHtml(s.progress);
+        : "This takes a few minutes."}</div>` +
+      barHtml(pendingAction === "destroy" ? "destroy" : ($("os")?.value || s.my_session?.os || "linux"),
+        (pendingAction === "destroy" ? s.my_session?.destroy_dispatched_at : s.my_session?.dispatched_at) || actionStartedAt) +
+      stepsHtml(s.progress);
+    tickBars();
     return;
   }
 
@@ -118,8 +159,13 @@ function renderMine(s) {
 
   const running = mine.status === "active";
   const isWin = mine.os === "windows";
-  let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}`;
-  if (running && mine.started_at) {
+  // A destroy in flight (server-side anchor, so it survives a reload): the
+  // desktop is still technically up, but showing "Running" plus Open/Destroy
+  // buttons invites a second click on a machine that is already going away.
+  const destroying = Boolean(mine.destroy_dispatched_at);
+  const label = destroying ? "Destroying&hellip;" : running ? "Running" : "Booting&hellip;";
+  let html = `<div><span class="dot ${running && !destroying ? "up" : "work"}"></span> ${label}${isWin ? " &middot; Windows" : ""}`;
+  if (running && !destroying && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
     const rate = isWin ? (s.hourly_usd_windows || 0.204) : (s.hourly_usd || 0.0529);
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
@@ -129,6 +175,11 @@ function renderMine(s) {
     html += ` <span class="sub">&middot; ${left > 0 ? fmtDur(left) + " left" : "ending&hellip;"}</span>`;
   }
   html += "</div>";
+  if (mine.destroy_dispatched_at) {
+    html += barHtml("destroy", mine.destroy_dispatched_at);
+  } else if (!running) {
+    html += barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
+  }
 
   // Linux: Basic-Auth credentials ride in the URL (see loginUrl) so the link
   // logs straight in. Windows: DCV has its own sign-in page and ignores URL
@@ -151,11 +202,12 @@ function renderMine(s) {
         <div class="sub">The browser blocked the tab we tried to open for you &mdash; use the button below.</div>
       </div>`;
   }
-  if (mine.url) html += `<a class="open" href="${esc(openUrl)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
-  html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
-  if (!running) html += stepsHtml(s.progress);
+  if (mine.url && !destroying) html += `<a class="open" href="${esc(openUrl)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
+  if (!destroying) html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
+  if (!running || destroying) html += stepsHtml(s.progress);
   box.innerHTML = html;
-  $("destroy").onclick = () => go("destroy");
+  tickBars();
+  if ($("destroy")) $("destroy").onclick = () => go("destroy");
   box.querySelectorAll(".copy-btn").forEach((btn) => (btn.onclick = () => copyToClipboard(btn)));
 }
 
@@ -195,7 +247,7 @@ async function go(action) {
   }
   if (action === "destroy" && !confirm("Destroy your desktop? Your files survive only if you chose to keep them.")) return;
   $("err").textContent = "";
-  busy = true; pendingAction = action;
+  busy = true; pendingAction = action; actionStartedAt = Date.now() / 1000;
   if (action === "start") startedByMe = true;
   renderMine({ progress: null });
   try {

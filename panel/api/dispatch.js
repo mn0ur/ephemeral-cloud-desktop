@@ -105,6 +105,10 @@ export default async function handler(req, res) {
     } catch (e) {
       return res.status(e.status || 500).json({ error: e.message });
     }
+    // Anchor for the panel's destroy progress bar. Kept on the session so a
+    // reload mid-destroy still shows how far along it is; the whole entry is
+    // dropped by session-ended when the workflow finishes.
+    await putSession(target, { ...sessions[target], destroy_dispatched_at: Date.now() / 1000 });
     return res.status(202).json({ ok: true });
   }
 

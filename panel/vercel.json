@@ -11,6 +11,12 @@
       "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
       "destination": "/admin.html",
       "permanent": false
+    },
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "admin.sihaab.com" }],
+      "destination": "/admin.html",
+      "permanent": false
     }
   ]
 }

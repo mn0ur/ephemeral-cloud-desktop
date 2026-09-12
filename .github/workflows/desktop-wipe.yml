@@ -63,6 +63,7 @@ jobs:
       - name: Delete the volume
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
         run: |
           set -uo pipefail
           USER="${{ inputs.guest_username }}"
@@ -112,7 +113,7 @@ jobs:
           fi
 
           if [ "$DELETED" -gt 0 ] && [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
-            curl -fsS -X POST "https://desktop.mnour.dev/api/data-wiped" \
+            curl -fsS -X POST "$PANEL_URL/api/data-wiped" \
               -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
               -d "{\"username\":\"$USER\"}" \

@@ -274,6 +274,11 @@ jobs:
         if: inputs.guest_username != ''
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          # Repo variable, not a secret - this is a public URL, and this repo
+          # is public. The fallback keeps every callback working if the
+          # variable is never set, so a domain move is one variable edit
+          # rather than a hunt through four workflows.
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)
@@ -302,7 +307,7 @@ jobs:
             --arg os "${{ inputs.os }}" \
             --arg region "${{ inputs.region }}" \
             '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber), login_user:$login_user, os:$os, region:$region}')
-          curl -fsS -X POST "https://desktop.mnour.dev/api/session-ready" \
+          curl -fsS -X POST "$PANEL_URL/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"

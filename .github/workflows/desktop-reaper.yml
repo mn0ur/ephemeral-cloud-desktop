@@ -62,12 +62,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
         run: |
           set -uo pipefail
           NOW=$(date -u +%s)
 
           LIMIT_MIN=$(curl -fsS -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
-            https://desktop.mnour.dev/api/admin/config | jq -r '.guest_limit_minutes')
+            $PANEL_URL/api/admin/config | jq -r '.guest_limit_minutes')
           if ! [[ "$LIMIT_MIN" =~ ^[0-9]+$ ]]; then
             echo "::error::could not read guest_limit_minutes from the panel ('$LIMIT_MIN') - not destroying anything this run"
             exit 1
@@ -131,7 +132,7 @@ jobs:
                 if TF_VAR_username="$USERNAME" TF_VAR_os="$OS" TF_VAR_region="$AWS_REGION" \
                      TF_VAR_az_suffix="$AZ_SUFFIX" terraform -chdir=terraform destroy \
                      -auto-approve -input=false -lock-timeout=180s; then
-                  curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
+                  curl -fsS -X POST "$PANEL_URL/api/session-ended" \
                     -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
                     -H "Content-Type: application/json" \
                     -d "{\"username\":\"$USERNAME\",\"reason\":\"time_limit\"}" \

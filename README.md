@@ -228,6 +228,56 @@ whitespace picked up during initial setup — surfacing as a flat `403 bad
 callback secret` on every session-ready callback, fixed by regenerating and
 resetting both sides explicitly rather than guessing which one was wrong.
 
+## Windows desktops (admin-only)
+
+Windows Server 2025 (the Windows 11 24H2 shell), streamed via Amazon DCV,
+available only to admins from the same panel and the same `os` selector on
+`desktop.mnour.dev`.
+
+- **How it works:** a baked AMI (`Variant=windows`) boots into an
+  already-logged-in desktop. DCV listens on `127.0.0.1:8443`; **Caddy on 443
+  reverse-proxies it with a Let's Encrypt certificate** (Cloudflare DNS-01,
+  cert storage on `D:\caddy` so restarts reuse it). The DNS record is
+  DNS-only (not Cloudflare-proxied) — a direct Cloudflare proxy throttled DCV
+  to 1 fps / 300 ms versus 8 fps / 78 ms direct, so Caddy fronts it exactly
+  the way the Linux desktops already do.
+- **URL shape:** `https://<username>-desktop.mnour.dev` — single-label, so
+  the free Cloudflare Universal SSL wildcard (`*.mnour.dev`) covers it; a
+  two-level hostname does not.
+- **Cost:** `c7i.xlarge` (4 vCPU) spot, ~$0.204/hr Mumbai. The Windows
+  license is priced per vCPU and spot does not discount it, so this is
+  2-4x the equivalent Linux instance at any size.
+- **Baking:** Actions → *Bake Desktop AMI* → `os=windows`. The bake launches
+  the builder, provisions DCV/Caddy/apps, then **smoke-tests the result**:
+  launches the AMI, requires DCV to answer 200 on 8443, and deregisters the
+  AMI automatically on failure rather than shipping a broken image.
+- **Debugging a live session:** every Windows instance carries the
+  `desktop-ssm-diagnostics` IAM instance profile (SSM only, no other AWS
+  access), so `aws ssm send-command --document-name AWS-RunPowerShellScript`
+  is the way to inspect or fix a running box without RDP. Diagnostics
+  (setup transcript, DCV logs, service state) are written to
+  `D:\.desktop-diagnostics\<timestamp>\` on every exit path — success,
+  retry-exhaustion, or failure.
+
+### Lessons from the Windows rollout
+
+- **DCV refuses port 443 outright** ("Invalid port 443, ignoring all
+  endpoints") — it has to run on 8443, fronted by a reverse proxy for 443.
+- **A silently-fatal PowerShell parse error.** `"$i:"` inside a string is a
+  drive-qualified variable reference, not text-plus-colon — it broke
+  parsing for the *entire* script, so user-data never ran at all with no
+  error surfaced anywhere.
+- **`$ErrorActionPreference = "Stop"` leaks out of a `try` block.** Caddy's
+  normal stderr INFO logging was turned into a fatal `NativeCommandError`
+  by a `-Stop` set earlier in the script, killing the setup script outright.
+- **`New-Item -Force` on an existing registry key throws** — guard every
+  registry-key creation with `Test-Path` first.
+- **Writes to COM1 don't reach `get-console-output`** on these instances —
+  don't rely on the serial console for bake diagnostics; use SSM or an
+  attached-volume read instead.
+- **`winget` does not run as SYSTEM** (EC2Launch user-data's context) —
+  install baked apps from vendor MSIs instead.
+
 ## Cost
 
 | State | Measured |

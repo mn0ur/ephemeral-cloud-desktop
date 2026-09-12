@@ -116,6 +116,8 @@ function renderMine(s) {
     return;
   }
 
+  const running = mine.status === "active";
+  const isWin = mine.os === "windows";
   let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}`;
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;

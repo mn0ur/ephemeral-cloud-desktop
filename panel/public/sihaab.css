@@ -257,3 +257,9 @@ tr:last-child td{border-bottom:0}
 .sess-row:last-child{border-bottom:0}
 .sess-row strong{font-weight:600}
 .sess-row button{flex:none;min-width:auto;padding:8px 14px;font-size:.85rem}
+
+/* brand */
+.nav .name{display:inline-flex;align-items:center;gap:12px;letter-spacing:.04em}
+.nav .name img{width:36px;height:36px}
+.nav .chip{padding:4px 12px;font-size:.8rem}
+main{padding-top:28px}

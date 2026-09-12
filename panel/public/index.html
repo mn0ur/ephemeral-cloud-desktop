@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#0A1128">
-<title>cloud desktop</title>
+<title>Sihaab</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -29,7 +29,7 @@
 
 <header>
   <div class="wrap nav">
-    <a class="name" href="/">cloud <em>desktop</em></a>
+    <a class="name" href="/"><img src="/logo-96.png" alt="" width="40" height="40">SIHAAB</a>
     <div class="controls">
       <button id="theme-toggle" class="toggle" type="button" aria-label="Toggle dark or light mode">
         <svg class="moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -40,15 +40,9 @@
 </header>
 
 <main class="wrap">
-  <section>
-    <div class="kicker">Your machine</div>
-    <h1>A real computer, <em>in the cloud</em>.</h1>
-    <p class="lede">Sign in with your Google account, then choose whether to keep your files.
-      <strong>Nothing shuts down on its own</strong> &mdash; click Destroy when you finish, or it keeps billing.</p>
-  </section>
 
   <div class="device">
-    <div class="bar"><i></i><i></i><i></i><span class="url" id="url-pill">desktop.mnour.dev</span></div>
+    <div class="bar"><i></i><i></i><i></i><span class="url" id="url-pill"></span></div>
     <div class="body">
       <div id="g-wrap" class="g-wrap"></div>
       <div id="g-signed" class="signed-in" style="display:none">
@@ -74,6 +68,7 @@
   });
 </script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>document.getElementById('url-pill').textContent = location.host;</script>
 <script src="/app.js"></script>
 </body>
 </html>

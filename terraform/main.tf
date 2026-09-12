@@ -171,12 +171,11 @@ resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
   security_group_id = aws_security_group.session_access.id
   description       = "desktop UI - Cloudflare edge only (proxied hostname)"
   cidr_ipv4         = each.value
-  # Windows: DCV refuses to listen on 443 ("Invalid port 443, ignoring all
-  # endpoints" - it killed every baked image until 2026-09-12), so it stays on
-  # its default 8443 and a Cloudflare Origin Rule for *-desktop.<zone> sends
-  # proxied :443 traffic to origin :8443. Linux keeps Caddy on 443.
-  from_port         = local.windows ? 8443 : 443
-  to_port           = local.windows ? 8443 : 443
+  # 443 for both OSes: Linux and Windows both run Caddy on 443 (Windows'
+  # DCV listens on 8443 on localhost only as far as the outside is concerned -
+  # DCV refuses to bind 443 itself, "Invalid port 443, ignoring all endpoints").
+  from_port         = 443
+  to_port           = 443
   ip_protocol       = "tcp"
 }
 
@@ -335,8 +334,10 @@ resource "aws_instance" "desktop" {
   # gzipped user-data, and the PowerShell script is a few KB. Linux keeps
   # base64gzip for the reason in the comment above.
   user_data_base64 = local.windows ? base64encode(templatefile("${path.module}/user-data.ps1.tpl", {
-    username = local.windows_user
-    password = local.web_password
+    username                 = local.windows_user
+    password                 = local.web_password
+    hostname                 = local.effective_hostname
+    cloudflare_dns_api_token = var.cloudflare_dns_api_token
     })) : base64gzip(templatefile("${path.module}/user-data.sh.tpl", {
     hostname                 = local.effective_hostname
     image                    = var.image

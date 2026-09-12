@@ -67,6 +67,21 @@ try {
   Set-ItemProperty "$dcv\connectivity" "web-port" 8443 -Type DWord
   New-NetFirewallRule -DisplayName "DCV web 8443" -Direction Inbound -Protocol TCP -LocalPort 8443 -Action Allow | Out-Null
 
+  # Caddy in front of DCV, exactly as on Linux: a real Let's Encrypt
+  # certificate via the Cloudflare DNS-01 challenge, on 443, DNS-only record.
+  # Windows sessions ran through Cloudflare's proxy first (DCV's certificate
+  # is self-signed) and it throttled the stream to 1 fps / 300 ms; the same
+  # desktop reached directly did 8 fps / 78 ms (measured 2026-09-12). The
+  # binary is a server-side build with the dns.providers.cloudflare module -
+  # the same download the Linux bake makes - and is verified here so a bad
+  # binary fails the bake instead of every launch.
+  Write-Console "phase: caddy"
+  New-Item -ItemType Directory -Path C:\caddy -Force | Out-Null
+  Get-File "https://caddyserver.com/api/download?os=windows&arch=amd64&p=github.com/caddy-dns/cloudflare" C:\caddy\caddy.exe
+  $mods = & C:\caddy\caddy.exe list-modules 2>&1 | Out-String
+  if ($mods -notmatch 'dns\.providers\.cloudflare') { throw "caddy.exe lacks the cloudflare DNS module" }
+  New-NetFirewallRule -DisplayName "Caddy 443" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
+
   # Manual, not Automatic: the panel treats "443 answers" as "desktop ready".
   # If DCV came up with the image it would answer BEFORE user-data has created
   # the account and handed over the console session, and the user's first

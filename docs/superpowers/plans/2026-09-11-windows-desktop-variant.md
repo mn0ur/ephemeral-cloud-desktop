@@ -1204,3 +1204,77 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 git push
 git stash list   # remind: the PANEL_URL stash is still here for the sihaab.com work
 ```
+
+---
+
+## Results
+
+End-to-end proven by the owner on 2026-09-12 at
+`https://mnuowr-desktop.mnour.dev/` (Let's Encrypt certificate, direct):
+Windows boots, logs in automatically, and DCV is reachable through Caddy on
+443. Files saved to `D:\` root and to the redirected `Downloads` folder
+survived a full destroy and restart of the instance — the per-user NTFS
+volume attach/detach path holds.
+
+**Boot times (Start click to DCV answering):**
+- Fresh session (run 34688319766): 10:23:37Z → 10:26:43Z ≈ **3 min 6 s**.
+- Restart of an existing volume (run 34693627568): 12:25:32Z → 12:28:41Z ≈
+  **3 min 9 s**.
+
+**Badge numbers (fps / input latency, 1080p video, `c7i.xlarge`, CPU idle):**
+- Via Cloudflare proxy: **1 fps / 303 ms**.
+- Direct (no proxy): **8 fps / 78 ms**.
+- `m6i.large` (2 vCPU), direct: **4 fps / 296 ms**.
+
+**Size decision:** `instance_type_windows` defaults to `c7i.xlarge` (4 vCPU),
+not the originally-provisional `m6i.large` (2 vCPU) — the measurement above
+showed 2 vCPU starves software H.264 encoding (4 fps vs. 8 fps at 4 vCPU),
+so the ~2x cost is kept.
+
+**Root causes hit, in order, with their PRs:**
+1. **Registry `New-Item -Force` throws on a pre-existing key**
+   ("Cannot delete a subkey tree because the subkey does not exist") — found
+   via forensic read of `C:\bake-error.txt` off an attached root volume,
+   fixed with an existence-guarded helper (Task 1 fix round 2/3, folded into
+   PR #9).
+2. **Sysprep breaks `dcvserver`** — a sysprepped image's DCV died loading
+   display modules on first boot (bake `agent.log`:
+   `Could not setup idd system pipeline 0x80070057`). Fixed by dropping
+   sysprep (`EC2Launch.exe reset --clean` + `Stop-Computer`) and adding an
+   AMI smoke test that launches the image and requires DCV to answer before
+   trusting it (PR #12; a DCV-IDD-exclusion hypothesis tried in between did
+   not fix it — PR #13).
+3. **DCV refuses port 443** ("Invalid port 443, ignoring all endpoints" →
+   "No HTTP listen endpoints set") — proven by an A/B test on the same
+   image (443 fails, 8443 answers 200). Fixed by moving DCV to 8443 with a
+   Cloudflare Origin Rule to that port (PR #14).
+4. **Two-level hostname fails TLS** — free Cloudflare Universal SSL covers
+   only `*.mnour.dev` (one label), not `mnuowr.desktop.mnour.dev`. Fixed by
+   switching Windows hostnames to single-label,
+   `<username>-desktop.mnour.dev` (PR #10).
+5. **PowerShell parse error, `"$i:"` is a drive-qualified variable** — this
+   silently prevented the entire per-launch script from running for three
+   attempts in a row (`err.tmp` under
+   `C:\Windows\system32\config\systemprofile\AppData\Local\Temp\EC2Launch*\`,
+   read via SSM once IAM `create-role` turned out to work). Fixed as
+   `$($i):` (PR #15).
+6. **`$ErrorActionPreference = "Stop"` leaked out of a `try` block** —
+   turned Caddy's normal stderr INFO logging into a fatal
+   `NativeCommandError` that killed the setup script before Caddy's
+   scheduled task was ever registered. Fixed live over SSM, then in the
+   template (PR #19).
+7. **Cloudflare proxying throttled DCV** (1 fps / 300 ms vs. 8 fps / 78 ms
+   direct) — the reason Windows moved to the Caddy + Let's Encrypt + DNS-only
+   pattern Linux already uses, instead of the design's Cloudflare-proxy plan
+   (PR #17).
+
+Supporting fixes along the way: an AMI smoke test that deregisters a broken
+image automatically (PR #12); launch diagnostics written to
+`D:\.desktop-diagnostics\<timestamp>\` on every exit path, since C: state is
+lost on destroy (PR #11); the `desktop-ssm-diagnostics` IAM instance profile
+attached to every Windows session, the actual remote-debugging channel that
+replaced the serial console once writes to COM1 turned out not to reach
+`get-console-output` (PR #18); and the 4-vCPU default itself (PR #16).
+
+Task 9 (end-to-end verification) and Task 10 (size decision) are DONE per
+the above. Task 11 (this documentation pass) is the only remaining item.

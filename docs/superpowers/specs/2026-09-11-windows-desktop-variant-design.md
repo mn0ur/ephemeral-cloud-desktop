@@ -328,3 +328,45 @@ In order, each gating the next:
 - Opening Windows to permanent users / guests (policy flag in KV,
   reaper limit per OS, cost display).
 - `sihaab.com` domain cut-over (separate, already scoped).
+
+## As built (2026-09-12) — deviations from this design
+
+Real end-to-end rollout diverged from the design above on several points,
+each forced by something the design didn't anticipate. This section records
+the shipped shape; the sections above are left as originally written.
+
+- **DCV on 8443 behind Caddy, not on 443 behind Cloudflare's proxy.** DCV
+  refuses to start with "Invalid port 443, ignoring all endpoints" — 443 was
+  never viable on DCV itself. The design's Cloudflare-proxy plan was tried
+  once DCV was moved to 8443 and measured badly (1 fps / 300 ms vs 8 fps /
+  78 ms direct), so Windows was brought in line with the existing Linux
+  pattern instead: Caddy on 443 with a Let's Encrypt certificate (Cloudflare
+  DNS-01), reverse-proxying DCV on `127.0.0.1:8443`, DNS-only record.
+- **Single-label hostname**, `<username>-desktop.mnour.dev`, not a two-level
+  one — the free Cloudflare Universal SSL wildcard only covers `*.mnour.dev`
+  (one label), and a two-level name fails TLS at the edge.
+- **No sysprep.** A sysprepped image's `dcvserver` died loading display
+  modules on first boot. The image ships un-sysprepped
+  (`EC2Launch.exe reset --clean` + `Stop-Computer`); user-data still runs on
+  every launch and SID duplication doesn't matter for standalone desktops.
+- **Apps installed from vendor MSIs, not winget** — winget does not run
+  reliably under the SYSTEM account that EC2Launch user-data runs as.
+- **No Windows Update pass during the bake** — AWS republishes the base AMI
+  monthly with patches already applied; a PSWindowsUpdate install only adds
+  a dependency and 10+ minutes for no measured gain.
+- **Local password-complexity policy disabled in the image** — the
+  workflow's stored passwords are 32 hex characters (two character classes);
+  Windows' default policy demands three and would refuse them.
+- **Every Windows session carries the `desktop-ssm-diagnostics` IAM
+  instance profile** (SSM only) — added once IAM `create-role` turned out to
+  work (it had been assumed unavailable), because the previous debugging
+  path (serial console) doesn't work: writes to COM1 never reached
+  `get-console-output` on these instances.
+- **The bake includes a smoke test.** It launches the freshly-baked AMI,
+  requires DCV to answer HTTP 200 on 8443, and deregisters the AMI
+  automatically on failure — the design's bake had no way to catch a
+  broken image before it reached production.
+- **`instance_type_windows` defaults to `c7i.xlarge` (4 vCPU), not
+  `m6i.large` (2 vCPU).** The design's measurement task ran: `m6i.large`
+  held only 4 fps / 296 ms on 1080p video (software H.264 starves at 2
+  vCPU), so the 4-vCPU size was kept despite the ~2x cost.

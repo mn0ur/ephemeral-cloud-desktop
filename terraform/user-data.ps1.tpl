@@ -39,6 +39,8 @@ function Save-Diagnostics([string]$Reason) {
 }
 $User = '${username}'
 $Pass = '${password}'
+$Hostname = '${hostname}'
+$CfToken = '${cloudflare_dns_api_token}'
 
 try {
   # $ErrorActionPreference = "Stop" INSIDE the try only: the file-level
@@ -165,5 +167,43 @@ for ($i = 1; $i -le 8 -and -not $restarted; $i++) {
 }
 if (-not $restarted) { Write-Output "DESKTOP-SETUP-FAILED: dcvserver did not start; console session owner not applied" }
 if ($restarted) { Write-Output "desktop-setup complete for $User (D: present: $HasD)" }
+# ---------------------------------------------------------------------------
+# 5. Caddy on 443 in front of DCV (127.0.0.1:8443), with a Let's Encrypt
+#    certificate from the Cloudflare DNS-01 challenge - the Linux desktop's
+#    exact arrangement. No Cloudflare proxy in the streaming path: through
+#    the proxy DCV managed 1 fps / 300 ms, direct it did 8 fps / 78 ms.
+#    Certificates are stored on D: when it exists, so a user's restarts reuse
+#    the certificate instead of spending Let's Encrypt's 5-per-week
+#    duplicate limit. Runs as a SYSTEM scheduled task (Caddy is not an SCM
+#    service on Windows); "onstart" keeps it alive across any reboot.
+# ---------------------------------------------------------------------------
+if ($restarted -and $CfToken -ne '') {
+  $storage = if (Test-Path "D:\") { "D:\caddy" } else { "C:\caddy\data" }
+  New-Item -ItemType Directory -Path $storage -Force | Out-Null
+  @"
+{
+  email admin@$Hostname
+  storage file_system {
+    root $storage
+  }
+}
+$Hostname {
+  tls {
+    dns cloudflare $CfToken
+  }
+  reverse_proxy https://127.0.0.1:8443 {
+    transport http {
+      tls_insecure_skip_verify
+    }
+  }
+}
+"@ | Set-Content -Path C:\caddy\Caddyfile -Encoding ASCII
+  & C:\caddy\caddy.exe validate --config C:\caddy\Caddyfile 2>&1 | Out-String | Write-Output
+  schtasks /create /f /tn caddy /sc onstart /ru SYSTEM /rl HIGHEST /tr "C:\caddy\caddy.exe run --config C:\caddy\Caddyfile" | Out-Null
+  schtasks /run /tn caddy | Out-Null
+  Write-Output "caddy started for $Hostname (certificate storage: $storage)"
+} elseif ($restarted) {
+  Write-Output "no Cloudflare DNS token - caddy not started; DCV reachable on 8443 only"
+}
 if ($restarted) { Save-Diagnostics "ok" } else { Save-Diagnostics "dcv-start-failed" }
 </powershell>

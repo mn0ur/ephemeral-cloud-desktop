@@ -21,13 +21,12 @@ locals {
 
   windows = var.os == "windows"
 
-  # A Windows hostname is ALWAYS proxied: DCV presents a self-signed
-  # certificate and the browser must see Cloudflare's trusted one instead.
-  # (Zone SSL mode must be "Full" - not "Full (strict)" - for that to work.)
-  # Proxied also means the security group only admits Cloudflare's edge, so
-  # a Windows desktop is unreachable by direct IP. Linux keeps following
-  # access_enabled exactly as before.
-  proxied = local.access_enabled || local.windows
+  # Proxied only when Access is on - for BOTH OSes. Windows was forced through
+  # Cloudflare's proxy at first (DCV's own certificate is self-signed) and the
+  # proxy throttled the stream to 1 fps / 300 ms against 8 fps / 78 ms direct
+  # (measured 2026-09-12). Windows now runs Caddy on 443 with a Let's Encrypt
+  # certificate exactly like Linux, so its record is DNS-only too.
+  proxied = local.access_enabled
 
   # Windows local account names are limited to 20 characters; the panel
   # username (an email local part) is already a valid DNS label, which

@@ -39,9 +39,6 @@ jobs:
     # default. Generous enough for a fan-out of several sequential destroys.
     timeout-minutes: 30
 
-    env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +57,6 @@ jobs:
           fi
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
-          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
       - name: Discover every live guest desktop, destroy anything past the limit
         env:
@@ -79,51 +75,72 @@ jobs:
           LIMIT_S=$((LIMIT_MIN * 60))
           echo "current guest limit: ${LIMIT_MIN}m (${LIMIT_S}s)"
 
-          # LaunchTime and username together, tab-separated - LaunchTime alone
-          # cannot be joined back to a username without a second API call per
-          # instance.
-          ROWS=$(aws ec2 describe-instances --region "$AWS_REGION" \
-            --filters "Name=tag:Role,Values=guest-desktop" "Name=instance-state-name,Values=running,pending" \
-            --query 'Reservations[].Instances[].[Tags[?Key==`Owner`]|[0].Value,LaunchTime,Tags[?Key==`OS`]|[0].Value]' \
-            --output text)
+          # Both regions, one at a time - a guest desktop can be in either, and
+          # there is no single-call way to ask AWS "every region". az_suffix
+          # per region matches terraform/variables.tf's per-region defaults.
+          for AWS_REGION in ap-south-1 me-central-1; do
+            export AWS_REGION
+            export AWS_DEFAULT_REGION="$AWS_REGION"
+            case "$AWS_REGION" in
+              ap-south-1) AZ_SUFFIX=c ;;
+              me-central-1) AZ_SUFFIX=a ;;
+            esac
+            echo "=== checking $AWS_REGION ==="
 
-          if [ -z "$ROWS" ]; then
-            echo "no guest desktops currently running"
-            exit 0
-          fi
+            # LaunchTime and username together, tab-separated - LaunchTime alone
+            # cannot be joined back to a username without a second API call per
+            # instance.
+            ROWS=$(aws ec2 describe-instances --region "$AWS_REGION" \
+              --filters "Name=tag:Role,Values=guest-desktop" "Name=instance-state-name,Values=running,pending" \
+              --query 'Reservations[].Instances[].[Tags[?Key==`Owner`]|[0].Value,LaunchTime,Tags[?Key==`OS`]|[0].Value]' \
+              --output text)
 
-          echo "$ROWS" | while IFS=$'\t' read -r USERNAME LAUNCH_TIME OS; do
-            [ -z "$USERNAME" ] && continue
-            [ "$USERNAME" = "None" ] && continue
-            LAUNCH_S=$(date -u -d "$LAUNCH_TIME" +%s)
-            AGE_S=$((NOW - LAUNCH_S))
-            if [ -z "$OS" ] || [ "$OS" = "None" ]; then OS=linux; fi
-
-            if [ "$AGE_S" -ge "$LIMIT_S" ]; then
-              echo "$USERNAME: age ${AGE_S}s >= ${LIMIT_S}s limit - destroying (os=$OS)"
-              # -lock-timeout, not instant failure: this races a user clicking
-              # Destroy on the very desktop being reaped, which is a wait-your-
-              # turn situation, not an error.
-              terraform -chdir=terraform init -input=false -reconfigure -lock-timeout=180s \
-                -backend-config="key=desktop/user-$USERNAME/terraform.tfstate"
-
-              # The callback is gated on the destroy ACTUALLY succeeding. Posting
-              # session-ended unconditionally tells the panel the desktop is gone
-              # while it is still running and still billing - the panel drops the
-              # session, so the user loses the Destroy button for a machine that
-              # is very much alive. A failure here is left for the next tick,
-              # which will rediscover the same still-expired instance.
-              if TF_VAR_username="$USERNAME" TF_VAR_os="$OS" terraform -chdir=terraform destroy \
-                   -auto-approve -input=false -lock-timeout=180s; then
-                curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
-                  -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"username\":\"$USERNAME\",\"reason\":\"time_limit\"}" \
-                  || echo "::warning::callback failed for $USERNAME - destroy already succeeded"
-              else
-                echo "::error::terraform destroy FAILED for $USERNAME - instance may still be running and billing. Not posting session-ended; the next tick will retry."
-              fi
-            else
-              echo "$USERNAME: age ${AGE_S}s, under the ${LIMIT_S}s limit - leaving it"
+            if [ -z "$ROWS" ]; then
+              echo "no guest desktops currently running in $AWS_REGION"
+              continue
             fi
+
+            echo "$ROWS" | while IFS=$'\t' read -r USERNAME LAUNCH_TIME OS; do
+              [ -z "$USERNAME" ] && continue
+              [ "$USERNAME" = "None" ] && continue
+              LAUNCH_S=$(date -u -d "$LAUNCH_TIME" +%s)
+              AGE_S=$((NOW - LAUNCH_S))
+              if [ -z "$OS" ] || [ "$OS" = "None" ]; then OS=linux; fi
+
+              if [ "$AGE_S" -ge "$LIMIT_S" ]; then
+                echo "$USERNAME ($AWS_REGION): age ${AGE_S}s >= ${LIMIT_S}s limit - destroying (os=$OS)"
+                # ap-south-1 keeps its original state key so every session
+                # already running there is unaffected; any other region gets
+                # its own key, matching desktop-up.yml's rule exactly.
+                KEY="desktop/user-$USERNAME/terraform.tfstate"
+                if [ "$AWS_REGION" != "ap-south-1" ]; then
+                  KEY="desktop/user-$USERNAME/$AWS_REGION/terraform.tfstate"
+                fi
+                # -lock-timeout, not instant failure: this races a user clicking
+                # Destroy on the very desktop being reaped, which is a wait-your-
+                # turn situation, not an error.
+                terraform -chdir=terraform init -input=false -reconfigure -lock-timeout=180s \
+                  -backend-config="key=$KEY"
+
+                # The callback is gated on the destroy ACTUALLY succeeding. Posting
+                # session-ended unconditionally tells the panel the desktop is gone
+                # while it is still running and still billing - the panel drops the
+                # session, so the user loses the Destroy button for a machine that
+                # is very much alive. A failure here is left for the next tick,
+                # which will rediscover the same still-expired instance.
+                if TF_VAR_username="$USERNAME" TF_VAR_os="$OS" TF_VAR_region="$AWS_REGION" \
+                     TF_VAR_az_suffix="$AZ_SUFFIX" terraform -chdir=terraform destroy \
+                     -auto-approve -input=false -lock-timeout=180s; then
+                  curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
+                    -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"username\":\"$USERNAME\",\"reason\":\"time_limit\"}" \
+                    || echo "::warning::callback failed for $USERNAME - destroy already succeeded"
+                else
+                  echo "::error::terraform destroy FAILED for $USERNAME in $AWS_REGION - instance may still be running and billing. Not posting session-ended; the next tick will retry."
+                fi
+              else
+                echo "$USERNAME ($AWS_REGION): age ${AGE_S}s, under the ${LIMIT_S}s limit - leaving it"
+              fi
+            done
           done

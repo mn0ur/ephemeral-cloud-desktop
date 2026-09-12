@@ -36,14 +36,6 @@ jobs:
     # Deleting a volume is a handful of API calls; anything longer is stuck.
     timeout-minutes: 15
 
-    # Region and zone in ONE place. They used to be repeated inline in every
-    # aws call and every AWS_DEFAULT_REGION export, which is how a region move
-    # turns into a hunt. ap-south-1c specifically: spot there is $0.0529/hr
-    # against $0.0651 in ap-south-1a - the zone a hardcoded "a" would have
-    # picked - and 47% under eu-central-1.
-    env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
     steps:
       - name: Check confirmation
         run: |
@@ -67,7 +59,6 @@ jobs:
           fi
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
-          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
 
       - name: Delete the volume
         env:
@@ -78,36 +69,41 @@ jobs:
 
           DELETED=0
           BLOCKED=""
-          # Both roles: "delete my data" means all of it. Same tag pair the
-          # start workflow uses, so this can only match this user's desktop
-          # data volumes - never the owner's, the hub's, or a root disk.
-          for ROLE in desktop-guest-data desktop-guest-data-windows; do
-            read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes \
-              --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=$ROLE" \
-              --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
-            if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
-              echo "no $ROLE volume for '$USER'"
-              continue
-            fi
-            echo "$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
-            # Refuse while attached: deleting under a running desktop corrupts
-            # whatever is mid-write, and AWS rejects it anyway. Record it and
-            # keep going - one attached role must not strand the other role's
-            # volume or skip the data-wiped callback below.
-            if [ "$STATE" != "available" ]; then
-              echo "::error::Volume $VOL is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
-              BLOCKED="$BLOCKED $ROLE:$VOL"
-              continue
-            fi
-            aws ec2 delete-volume --volume-id "$VOL"
-            echo "deleted $VOL"
-            DELETED=$((DELETED+1))
-            sleep 3
-            if aws ec2 describe-volumes --volume-ids "$VOL" >/dev/null 2>&1; then
-              echo "::warning::$VOL still visible - deletion may still be settling."
-            else
-              echo "confirmed: $VOL no longer exists"
-            fi
+          # Both regions, both roles: "delete my data" means all of it,
+          # wherever the user's sessions have run. Same tag pair the start
+          # workflow uses, so this can only match this user's desktop data
+          # volumes - never the owner's, the hub's, or a root disk.
+          for AWS_REGION in ap-south-1 me-central-1; do
+            export AWS_REGION
+            export AWS_DEFAULT_REGION="$AWS_REGION"
+            for ROLE in desktop-guest-data desktop-guest-data-windows; do
+              read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes --region "$AWS_REGION" \
+                --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=$ROLE" \
+                --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
+              if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
+                echo "no $ROLE volume for '$USER' in $AWS_REGION"
+                continue
+              fi
+              echo "$AWS_REGION/$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
+              # Refuse while attached: deleting under a running desktop corrupts
+              # whatever is mid-write, and AWS rejects it anyway. Record it and
+              # keep going - one attached role must not strand the other role's
+              # volume or skip the data-wiped callback below.
+              if [ "$STATE" != "available" ]; then
+                echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
+                BLOCKED="$BLOCKED $AWS_REGION/$ROLE:$VOL"
+                continue
+              fi
+              aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$VOL"
+              echo "deleted $VOL in $AWS_REGION"
+              DELETED=$((DELETED+1))
+              sleep 3
+              if aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$VOL" >/dev/null 2>&1; then
+                echo "::warning::$VOL still visible - deletion may still be settling."
+              else
+                echo "confirmed: $VOL no longer exists"
+              fi
+            done
           done
           if [ "$DELETED" -eq 0 ] && [ -z "$BLOCKED" ]; then
             echo "No saved data volumes for '$USER' - nothing to delete."

@@ -20,6 +20,11 @@ on:
         type: choice
         options: [linux, windows]
         default: linux
+      region:
+        description: "Which region this session runs in. Terraform must evaluate the same region+AZ it applied; the panel sends the session's recorded region."
+        type: choice
+        options: [ap-south-1, me-central-1]
+        default: ap-south-1
 
 permissions:
   contents: read
@@ -46,8 +51,7 @@ jobs:
     # cache and same key as desktop-up.yml, so a start warms the cache that
     # the following destroy then hits.
     env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
+      AWS_REGION: ${{ inputs.region }}
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
 
     steps:
@@ -65,6 +69,16 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.7
+
+      - name: Map region to its AZ suffix
+        run: |
+          case "${{ inputs.region }}" in
+            ap-south-1) SUFFIX=c ;;
+            me-central-1) SUFFIX=a ;;
+            *) echo "::error::unknown region ${{ inputs.region }} - no AZ suffix mapping"; exit 1 ;;
+          esac
+          echo "AZ_SUFFIX=$SUFFIX" >> "$GITHUB_ENV"
+          echo "AWS_AZ=${{ inputs.region }}$SUFFIX" >> "$GITHUB_ENV"
 
       - name: Prepare provider cache dir
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -100,10 +114,18 @@ jobs:
           TF_VAR_cloudflare_dns_api_token: ${{ inputs.guest_username != '' && secrets.CLOUDFLARE_API_TOKEN || '' }}
           TF_VAR_enable_access: ${{ inputs.enable_access }}
           TF_VAR_os: ${{ inputs.os }}
+          TF_VAR_region: ${{ inputs.region }}
+          TF_VAR_az_suffix: ${{ env.AZ_SUFFIX }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
             KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+            # Must match the KEY rule in desktop-up.yml exactly, or this
+            # destroy targets an empty state instead of the one the session
+            # actually applied.
+            if [ "${{ inputs.region }}" != "ap-south-1" ]; then
+              KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
+            fi
           fi
           # See desktop-up.yml: lock contention with the reaper or a racing
           # apply should be a short wait, not an immediate failure.

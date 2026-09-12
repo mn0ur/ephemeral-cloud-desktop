@@ -69,6 +69,11 @@ on:
         description: "Instance type when os=windows. c7i.xlarge (4 vCPU): m6i.large (2 vCPU) measured 4 fps / ~300 ms - DCV software encoding starves on 2 vCPU."
         required: false
         default: "c7i.xlarge"
+      region:
+        description: "AWS region. ap-south-1 (Mumbai, default) or me-central-1 (UAE). Admin-only from the panel; there is no policy here - the panel is the enforcement point. Each region has its own network stack and state key (see the terraform apply step)."
+        type: choice
+        options: [ap-south-1, me-central-1]
+        default: ap-south-1
 
 permissions:
   contents: read
@@ -101,8 +106,7 @@ jobs:
     # download entirely, and the lockfile is exactly the right key: it changes
     # if and only if a provider version changes.
     env:
-      AWS_REGION: ap-south-1
-      AWS_AZ: ap-south-1c
+      AWS_REGION: ${{ inputs.region }}
       TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.tf-plugin-cache
 
     steps:
@@ -111,6 +115,20 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.7
+
+      # AZ_SUFFIX/AWS_AZ in one place, not repeated per region: see
+      # terraform/variables.tf for why the suffix is not always "a" (spot
+      # pricing varies by zone) - ap-south-1c and me-central-1a are each the
+      # measured cheapest zone in their region.
+      - name: Map region to its AZ suffix
+        run: |
+          case "${{ inputs.region }}" in
+            ap-south-1) SUFFIX=c ;;
+            me-central-1) SUFFIX=a ;;
+            *) echo "::error::unknown region ${{ inputs.region }} - no AZ suffix mapping"; exit 1 ;;
+          esac
+          echo "AZ_SUFFIX=$SUFFIX" >> "$GITHUB_ENV"
+          echo "AWS_AZ=${{ inputs.region }}$SUFFIX" >> "$GITHUB_ENV"
 
       - name: Cache Terraform providers
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -226,10 +244,20 @@ jobs:
           TF_VAR_gpu: ${{ inputs.gpu }}
           TF_VAR_os: ${{ inputs.os }}
           TF_VAR_instance_type_windows: ${{ inputs.instance_type_windows }}
+          TF_VAR_region: ${{ inputs.region }}
+          TF_VAR_az_suffix: ${{ env.AZ_SUFFIX }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
             KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+            # ap-south-1 keeps the state key it always had, so every session
+            # already running there keeps working unchanged. Any other region
+            # gets its own key - it MUST, since it is a different, otherwise
+            # untracked, set of resources (see terraform/main.tf's per-region
+            # network remote state).
+            if [ "${{ inputs.region }}" != "ap-south-1" ]; then
+              KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
+            fi
           fi
           # -lock-timeout instead of failing instantly: the reaper, a manual
           # destroy and this apply can all target one username's state, and
@@ -272,7 +300,8 @@ jobs:
             --arg launched_at "$LAUNCHED_AT" \
             --arg login_user "$LOGIN_USER" \
             --arg os "${{ inputs.os }}" \
-            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber), login_user:$login_user, os:$os}')
+            --arg region "${{ inputs.region }}" \
+            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber), login_user:$login_user, os:$os, region:$region}')
           curl -fsS -X POST "https://desktop.mnour.dev/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
@@ -294,6 +323,7 @@ jobs:
             echo "| Username | \`${{ inputs.username }}\` |"
             echo "| Fresh start | \`${{ inputs.fresh }}\` |"
             echo "| OS | \`${{ inputs.os }}\` |"
+            echo "| Region | \`${{ inputs.region }}\` |"
             echo "| Instance | \`${{ inputs.os == 'windows' && inputs.instance_type_windows || inputs.instance_type }}\` |"
             echo ""
             echo "The password is NOT printed here - job logs are readable by anyone"

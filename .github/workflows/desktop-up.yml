@@ -29,11 +29,11 @@ on:
         required: false
         default: "c7i.xlarge"
       # Everything below is for the guest self-service control panel at
-      # desktop.mnour.dev, not for a human clicking "Run workflow". Left at
-      # their defaults, this run is the owner's own desk.mnour.dev desktop,
+      # desktop.sihaab.com, not for a human clicking "Run workflow". Left at
+      # their defaults, this run is the owner's own desk.sihaab.com desktop,
       # unchanged from before this section existed.
       guest_username:
-        description: "Empty for the owner's own desktop, or a username (from Google sign-in) for a per-user desktop at <username>.desktop.mnour.dev."
+        description: "Empty for the owner's own desktop, or a username (from Google sign-in) for a per-user desktop at <username>.desktop.sihaab.com."
         required: false
         default: ""
       owner_email:
@@ -266,7 +266,7 @@ jobs:
           terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
           terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s
 
-      - name: Tell desktop.mnour.dev the guest session is ready
+      - name: Tell desktop.sihaab.com the guest session is ready
         # The control panel holds no AWS or Terraform credentials - by design,
         # so a compromised panel can never touch infrastructure directly. It
         # cannot read `terraform output` itself, so the guest's URL and
@@ -278,7 +278,7 @@ jobs:
           # is public. The fallback keeps every callback working if the
           # variable is never set, so a domain move is one variable edit
           # rather than a hunt through four workflows.
-          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)

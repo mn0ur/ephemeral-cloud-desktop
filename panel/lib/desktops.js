@@ -1,6 +1,6 @@
 // Desktop liveness and session reconciliation.
 
-export const DESKTOP_DOMAIN = process.env.DESKTOP_DOMAIN || "desktop.mnour.dev";
+export const DESKTOP_DOMAIN = process.env.DESKTOP_DOMAIN || "desktop.sihaab.com";
 export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
 // c7i.xlarge spot in me-central-1a, measured 2026-08-25. Keep in step with
 // terraform/variables.tf: a region move that forgets this line makes the

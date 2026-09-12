@@ -1,7 +1,7 @@
 name: Desktop - REAPER
 
 # Per-user desktops carry a hard time limit set on the admin console
-# (admin.desktop.mnour.dev) and enforced here by comparing each guest
+# (admin.sihaab.com) and enforced here by comparing each guest
 # instance's LaunchTime (from the EC2 API) against that limit - not an
 # in-guest activity tracker, which was never verified against real traffic
 # and whose failure mode (silently going stale) is worse than this one's
@@ -62,7 +62,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
-          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
         run: |
           set -uo pipefail
           NOW=$(date -u +%s)

@@ -79,7 +79,7 @@ locals {
 #   terraform -chdir=terraform/persistent apply
 # Guest and permanent-user sessions never reach this lookup at all - they get
 # their own per-user volume, created by desktop-up.yml in the right AZ - so
-# only the owner's own desk.mnour.dev desktop depends on this.
+# only the owner's own desk.sihaab.com desktop depends on this.
 data "aws_ebs_volume" "data" {
   count = var.username == "" ? 1 : 0
 
@@ -469,7 +469,7 @@ resource "null_resource" "dns" {
     parked = "192.0.2.1"
     # Passed explicitly rather than derived inside the script. Deriving it by
     # stripping one label worked for desk.mnour.sd and broke silently for
-    # mnuowr.desktop.mnour.dev, which has an extra label - see set-dns.sh.
+    # mnuowr.desktop.sihaab.com, which has an extra label - see set-dns.sh.
     zone = var.cloudflare_zone
     # Access can only gate a PROXIED hostname, so the record's proxy setting
     # has to follow enable_access. Kept in triggers because destroy-time

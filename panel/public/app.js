@@ -126,7 +126,7 @@ function renderMine(s) {
   const isWin = mine.os === "windows";
   // Short form for the card, not the full selector label ("India (Mumbai)")
   // - nothing shown for the default region, same as Linux getting no badge.
-  const regionShort = { "ap-south-1": "India", "me-central-1": "UAE" }[mine.region];
+  const regionShort = { "ap-south-1": "India" }[mine.region];
   const regionBadge = mine.region && mine.region !== "ap-south-1" && regionShort
     ? ` &middot; ${esc(regionShort)}` : "";
   let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}${regionBadge}`;

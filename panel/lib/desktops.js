@@ -35,7 +35,9 @@ export function requestedOs(isAdmin, bodyOs) {
 // per region.
 export const REGIONS = {
   "ap-south-1": { az: "c", label: "India (Mumbai)" },
-  "me-central-1": { az: "a", label: "UAE" },
+  // me-central-1 (UAE) was here 2026-09-12/13 and is removed: AWS throttles
+  // RunInstances in ALL its zones for this account ("operational issue",
+  // seen in August and again 2026-09-12). Re-add once a launch there works.
 };
 
 // Same shape as requestedOs: admin-only, server is the actual enforcement

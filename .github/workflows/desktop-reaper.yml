@@ -78,7 +78,7 @@ jobs:
           # Both regions, one at a time - a guest desktop can be in either, and
           # there is no single-call way to ask AWS "every region". az_suffix
           # per region matches terraform/variables.tf's per-region defaults.
-          for AWS_REGION in ap-south-1 me-central-1; do
+          for AWS_REGION in ap-south-1; do
             export AWS_REGION
             export AWS_DEFAULT_REGION="$AWS_REGION"
             case "$AWS_REGION" in

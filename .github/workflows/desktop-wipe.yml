@@ -73,7 +73,7 @@ jobs:
           # wherever the user's sessions have run. Same tag pair the start
           # workflow uses, so this can only match this user's desktop data
           # volumes - never the owner's, the hub's, or a root disk.
-          for AWS_REGION in ap-south-1 me-central-1; do
+          for AWS_REGION in ap-south-1; do
             export AWS_REGION
             export AWS_DEFAULT_REGION="$AWS_REGION"
             for ROLE in desktop-guest-data desktop-guest-data-windows; do

@@ -23,7 +23,7 @@ on:
       region:
         description: "Which region this session runs in. Terraform must evaluate the same region+AZ it applied; the panel sends the session's recorded region."
         type: choice
-        options: [ap-south-1, me-central-1]
+        options: [ap-south-1]
         default: ap-south-1
 
 permissions:

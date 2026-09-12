@@ -15,7 +15,7 @@ export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0529);
 // per vCPU and spot does not discount it. m6i.large (2 vCPU) Windows spot in
 // ap-south-1, measured 2026-09-11. Keep in step with
 // terraform/variables.tf instance_type_windows.
-export const HOURLY_USD_WINDOWS = Number(process.env.HOURLY_USD_WINDOWS || 0.103);
+export const HOURLY_USD_WINDOWS = Number(process.env.HOURLY_USD_WINDOWS || 0.204);
 export const PENDING_TIMEOUT_S = 10 * 60;
 
 export function hourlyRate(os) {

@@ -433,3 +433,9 @@ variable "cloudflare_dns_api_token" {
   default     = ""
   sensitive   = true
 }
+
+variable "windows_ssm_instance_profile" {
+  description = "Name of an existing IAM instance profile (AmazonSSMManagedInstanceCore only) attached to every Windows session so it can be inspected with aws ssm send-command. Empty disables it."
+  type        = string
+  default     = "desktop-ssm-diagnostics"
+}

@@ -318,7 +318,13 @@ resource "aws_instance" "desktop" {
     data.terraform_remote_state.network.outputs.security_group_id,
     aws_security_group.session_access.id,
   ]
-  iam_instance_profile = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : null
+  # Windows sessions always carry the SSM-only profile (created 2026-09-12,
+  # policy AmazonSSMManagedInstanceCore, nothing else): a Windows box has no
+  # SSH, no RDP and no readable console, and `aws ssm send-command` is the
+  # only way to see what a launch did. Attached at launch - associating it
+  # to a running instance never registered (the agent does not re-read
+  # credentials without a restart). Linux keeps the existing opt-in role.
+  iam_instance_profile = var.enable_instance_role ? aws_iam_instance_profile.desktop[0].name : (local.windows ? var.windows_ssm_instance_profile : null)
   key_name             = var.enable_ssh ? data.terraform_remote_state.network.outputs.key_name : null
 
   user_data_replace_on_change = true

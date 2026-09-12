@@ -29,6 +29,23 @@ export function requestedOs(isAdmin, bodyOs) {
   return isAdmin === true && bodyOs === "windows" ? "windows" : "linux";
 }
 
+// Mumbai stays the default so every running session (and the state key that
+// tracks it, see dispatch.js) keeps working unchanged. UAE AMIs are being
+// baked in parallel - az matches terraform/variables.tf's az_suffix default
+// per region.
+export const REGIONS = {
+  "ap-south-1": { az: "c", label: "India (Mumbai)" },
+  "me-central-1": { az: "a", label: "UAE" },
+};
+
+// Same shape as requestedOs: admin-only, server is the actual enforcement
+// point, the client selector is only a hint.
+export function requestedRegion(isAdmin, bodyRegion) {
+  return isAdmin === true && Object.prototype.hasOwnProperty.call(REGIONS, bodyRegion)
+    ? bodyRegion
+    : "ap-south-1";
+}
+
 // What "the desktop answers" means per OS. Linux: Caddy serves /healthz.
 // Windows: DCV serves its web client at / and has no health endpoint - a
 // 200 there is the equivalent signal. Without this a Windows session would

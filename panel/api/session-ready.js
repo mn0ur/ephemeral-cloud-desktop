@@ -1,5 +1,6 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
 import { loadSessions, putSession, logEvent, getGuestLimitMinutes } from "../lib/state.js";
+import { REGIONS } from "../lib/desktops.js";
 
 // Called by desktop-up.yml once terraform apply succeeds. This deployment holds
 // no AWS or Terraform credentials by design, so it cannot read `terraform
@@ -26,6 +27,10 @@ export default async function handler(req, res) {
   // os was decided at dispatch from a verified session; the callback's value
   // is only a fallback for a session with no prior state (redeploy mid-run).
   const os = prior.os || (req.body?.os === "windows" ? "windows" : "linux");
+  // region was decided at dispatch from a verified admin session; the
+  // callback's value is only a fallback for a session with no prior state
+  // (redeploy mid-run), same as os above.
+  const region = prior.region || (REGIONS[req.body?.region] ? req.body.region : "ap-south-1");
   await putSession(username, {
     status: "ready", // the page polls the per-OS probe before calling it active
     email,
@@ -35,8 +40,9 @@ export default async function handler(req, res) {
     started_at: startedAt,
     is_guest: isGuest,
     os,
+    region,
     ...(isGuest ? { expires_at: startedAt + (await getGuestLimitMinutes()) * 60 } : {}),
   });
-  await logEvent("start", { username, email, url: req.body?.url, os });
+  await logEvent("start", { username, email, url: req.body?.url, os, region });
   return res.status(200).json({ ok: true });
 }

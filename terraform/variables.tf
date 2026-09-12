@@ -2,6 +2,12 @@ variable "region" {
   description = <<-EOT
     AWS region the desktop runs in.
 
+    Now a per-session input, not a fixed deployment choice: the panel's admin
+    region selector sets this via TF_VAR_region in desktop-up.yml /
+    desktop-down.yml / desktop-reaper.yml, one of ap-south-1 (default) or
+    me-central-1. The default below is what a plain `terraform apply` (or any
+    session that leaves the panel's selector alone) still gets.
+
     ap-south-1 (Mumbai) as of 2026-08-10, moved from eu-central-1 (Frankfurt)
     on measured numbers rather than assumption:
 
@@ -27,6 +33,11 @@ variable "region" {
 variable "az_suffix" {
   description = <<-EOT
     Which availability zone within the region, as a bare suffix ("a", "b", "c").
+
+    Now a per-session input alongside region: the workflows set this via
+    TF_VAR_az_suffix to match whichever region the panel's admin selector
+    chose (ap-south-1 -> "c", me-central-1 -> "a" - see desktop-up.yml). The
+    default below applies only when nothing overrides it.
 
     NOT hardcoded to "a", because spot pricing varies materially between zones
     and "a" is not reliably the cheapest. Measured in ap-south-1 on 2026-08-10:

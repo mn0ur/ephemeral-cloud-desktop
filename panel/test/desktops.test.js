@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  hourlyRate, requestedOs, probeUrl, HOURLY_USD, HOURLY_USD_WINDOWS,
+  hourlyRate, requestedOs, probeUrl, HOURLY_USD, HOURLY_USD_WINDOWS, requestedRegion, REGIONS,
 } from "../lib/desktops.js";
 
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
@@ -18,6 +18,16 @@ test("requestedOs: only an admin asking for windows gets windows", () => {
   assert.equal(requestedOs(true, undefined), "linux");
   assert.equal(requestedOs(true, "WINDOWS"), "linux"); // exact match only
   assert.equal(requestedOs(true, { os: "windows" }), "linux");
+});
+
+test("requestedRegion: only an admin asking for a known region gets it, else the default", () => {
+  assert.equal(requestedRegion(true, "me-central-1"), "me-central-1");
+  assert.equal(requestedRegion(true, "ap-south-1"), "ap-south-1");
+  assert.equal(requestedRegion(true, "eu-west-1"), "ap-south-1"); // unknown region
+  assert.equal(requestedRegion(false, "me-central-1"), "ap-south-1"); // non-admin
+  assert.equal(requestedRegion(true, undefined), "ap-south-1");
+  assert.ok(Object.keys(REGIONS).includes("ap-south-1"));
+  assert.ok(Object.keys(REGIONS).includes("me-central-1"));
 });
 
 test("probeUrl: /healthz for linux, DCV root for windows, null passes through", () => {

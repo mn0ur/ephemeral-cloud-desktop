@@ -204,13 +204,13 @@ variable "instance_type_windows" {
   description = <<-EOT
     Used when os = windows. Windows' licence is priced per vCPU and spot does
     not discount it, so 2 vCPU / 8GB (m6i.large, $0.103/hr spot in
-    ap-south-1 on 2026-09-11) is half the price of 4 vCPU / 8GB
-    (c7i.xlarge, $0.204). Whether 2 vCPU streams 1080p video acceptably is
-    the measured question - see the plan; change this default from that
-    measurement, not by guess.
+    ap-south-1) is half the price of 4 vCPU / 8GB (c7i.xlarge, $0.204).
+    MEASURED 2026-09-12: on m6i.large DCV's software H.264 encoder starved -
+    4 fps, ~300 ms in the client on a plain desktop, no video. Unusable.
+    c7i.xlarge is the floor; GPU (NVENC) is the real fix once quota allows.
   EOT
   type        = string
-  default     = "m6i.large"
+  default     = "c7i.xlarge"
 }
 
 variable "root_volume_gb_windows" {

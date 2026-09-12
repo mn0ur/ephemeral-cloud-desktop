@@ -118,7 +118,7 @@ function renderMine(s) {
   let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}`;
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
-    const rate = isWin ? (s.hourly_usd_windows || 0.103) : (s.hourly_usd || 0.0529);
+    const rate = isWin ? (s.hourly_usd_windows || 0.204) : (s.hourly_usd || 0.0529);
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
   }
   if (mine.expires_at) {

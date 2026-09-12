@@ -66,9 +66,9 @@ on:
         options: [linux, windows]
         default: linux
       instance_type_windows:
-        description: "Instance type when os=windows. m6i.large (2 vCPU/8GB) is half the price of a 4-vCPU size because the Windows licence is per vCPU; set c7i.xlarge if video playback stutters."
+        description: "Instance type when os=windows. c7i.xlarge (4 vCPU): m6i.large (2 vCPU) measured 4 fps / ~300 ms - DCV software encoding starves on 2 vCPU."
         required: false
-        default: "m6i.large"
+        default: "c7i.xlarge"
 
 permissions:
   contents: read

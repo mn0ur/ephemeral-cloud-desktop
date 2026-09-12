@@ -171,8 +171,12 @@ resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
   security_group_id = aws_security_group.session_access.id
   description       = "desktop UI - Cloudflare edge only (proxied hostname)"
   cidr_ipv4         = each.value
-  from_port         = 443
-  to_port           = 443
+  # Windows: DCV refuses to listen on 443 ("Invalid port 443, ignoring all
+  # endpoints" - it killed every baked image until 2026-09-12), so it stays on
+  # its default 8443 and a Cloudflare Origin Rule for *-desktop.<zone> sends
+  # proxied :443 traffic to origin :8443. Linux keeps Caddy on 443.
+  from_port         = local.windows ? 8443 : 443
+  to_port           = local.windows ? 8443 : 443
   ip_protocol       = "tcp"
 }
 

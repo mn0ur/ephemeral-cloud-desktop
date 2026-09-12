@@ -151,6 +151,12 @@ try {
 #    has succeeded (the try/catch above did not exit 1) is it safe to bring
 #    the port up.
 # ---------------------------------------------------------------------------
+# Back to "Continue" explicitly: the "Stop" set inside the try above is a
+# global preference and OUTLIVES the try block. Left at Stop, the first native
+# command that writes to stderr - caddy.exe logs INFO lines there - becomes a
+# terminating error and the script dies silently before Caddy is scheduled
+# (2026-09-12, session i-0d4ba144319e522c3).
+$ErrorActionPreference = "Continue"
 Set-Service dcvserver -StartupType Automatic
 # DCV may still be in start-pending this early in boot. Retry, and make a
 # failure unmistakable in the transcript - without the service actually
@@ -198,7 +204,9 @@ $Hostname {
   }
 }
 "@ | Set-Content -Path C:\caddy\Caddyfile -Encoding ASCII
-  & C:\caddy\caddy.exe validate --config C:\caddy\Caddyfile 2>&1 | Out-String | Write-Output
+  # Never pipe caddy's stderr into PowerShell error records - redirect to files.
+  $v = Start-Process C:\caddy\caddy.exe -ArgumentList "validate --config C:\caddy\Caddyfile" -Wait -PassThru -RedirectStandardOutput C:\caddy\validate-out.txt -RedirectStandardError C:\caddy\validate-err.txt
+  Write-Output "caddy validate exit code $($v.ExitCode)"
   schtasks /create /f /tn caddy /sc onstart /ru SYSTEM /rl HIGHEST /tr "C:\caddy\caddy.exe run --config C:\caddy\Caddyfile" | Out-Null
   schtasks /run /tn caddy | Out-Null
   Write-Output "caddy started for $Hostname (certificate storage: $storage)"

@@ -136,12 +136,13 @@ jobs:
         if: inputs.guest_username != ''
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
         run: |
           if [ -z "$HUB_CALLBACK_SECRET" ]; then
             echo "::warning::HUB_CALLBACK_SECRET not set - the control panel will not learn this session ended until its next status poll notices /healthz stopped answering."
             exit 0
           fi
-          curl -fsS -X POST "https://desktop.mnour.dev/api/session-ended" \
+          curl -fsS -X POST "$PANEL_URL/api/session-ended" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "{\"username\":\"${{ inputs.guest_username }}\",\"reason\":\"manual\"}" \

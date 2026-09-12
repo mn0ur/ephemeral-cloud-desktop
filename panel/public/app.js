@@ -103,17 +103,11 @@ function renderMine(s) {
     const osSelect = session.is_admin
       ? `<label>Operating system <select id="os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>`
       : "";
-    // Admin-only for now, same reasoning as os above (server-enforced in
-    // /api/dispatch). Options come from s.regions so a region cannot be
-    // shown here without also being valid server-side.
-    const regionSelect = session.is_admin
-      ? `<label>Region <select id="region">${Object.entries(s.regions || {})
-          .map(([key, r]) => `<option value="${esc(key)}">${esc(r.label)}</option>`)
-          .join("")}</select></label>`
-      : "";
+    // No region selector: only one region is offered (ap-south-1). The
+    // server still records and enforces region; re-add a selector when a
+    // second region actually works (see REGIONS in lib/desktops.js).
     box.innerHTML = `
       ${osSelect}
-      ${regionSelect}
       ${persistLabel}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
       ${dataBlock}`;
@@ -122,14 +116,7 @@ function renderMine(s) {
     return;
   }
 
-  const running = mine.status === "active";
-  const isWin = mine.os === "windows";
-  // Short form for the card, not the full selector label ("India (Mumbai)")
-  // - nothing shown for the default region, same as Linux getting no badge.
-  const regionShort = { "ap-south-1": "India" }[mine.region];
-  const regionBadge = mine.region && mine.region !== "ap-south-1" && regionShort
-    ? ` &middot; ${esc(regionShort)}` : "";
-  let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}${regionBadge}`;
+  let html = `<div><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Booting&hellip;"}${isWin ? " &middot; Windows" : ""}`;
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
     const rate = isWin ? (s.hourly_usd_windows || 0.204) : (s.hourly_usd || 0.0529);
@@ -203,7 +190,6 @@ async function go(action) {
   if (action === "start") {
     body.persist = $("persist")?.checked || false;
     body.os = $("os")?.value || "linux";
-    body.region = $("region")?.value || "ap-south-1";
   }
   if (action === "destroy" && !confirm("Destroy your desktop? Your files survive only if you chose to keep them.")) return;
   $("err").textContent = "";

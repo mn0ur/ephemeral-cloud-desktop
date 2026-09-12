@@ -159,7 +159,7 @@ for ($i = 1; $i -le 8 -and -not $restarted; $i++) {
   try { Start-Service dcvserver -ErrorAction Stop; $restarted = $true }
   catch {
     Write-Output "dcvserver start attempt $i failed: $($_.Exception.Message)"
-    Write-Output "dcvserver status after attempt $i: $((Get-Service dcvserver -ErrorAction SilentlyContinue).Status)"
+    Write-Output "dcvserver status after attempt $($i): $((Get-Service dcvserver -ErrorAction SilentlyContinue).Status)"
     Start-Sleep -Seconds 15
   }
 }

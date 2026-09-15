@@ -7,14 +7,35 @@
   },
   "redirects": [
     {
-      "source": "/",
-      "has": [{ "type": "host", "value": "admin.desktop.mnour.dev" }],
-      "destination": "/admin.html",
+      "source": "/:path((?!api/).*)",
+      "has": [
+        {
+          "type": "host",
+          "value": "desktop.mnour.dev"
+        }
+      ],
+      "destination": "https://desktop.sihaab.com/:path",
+      "permanent": false
+    },
+    {
+      "source": "/:path((?!api/).*)",
+      "has": [
+        {
+          "type": "host",
+          "value": "admin.desktop.mnour.dev"
+        }
+      ],
+      "destination": "https://admin.sihaab.com/:path",
       "permanent": false
     },
     {
       "source": "/",
-      "has": [{ "type": "host", "value": "admin.sihaab.com" }],
+      "has": [
+        {
+          "type": "host",
+          "value": "admin.sihaab.com"
+        }
+      ],
       "destination": "/admin.html",
       "permanent": false
     }

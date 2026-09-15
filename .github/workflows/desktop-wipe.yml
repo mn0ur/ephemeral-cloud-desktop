@@ -1,4 +1,7 @@
 name: Desktop - WIPE SAVED DATA
+# One label per user: the panel shows a user ONLY their own run and matches
+# on this name (panel/lib/desktops.js runBelongsTo).
+run-name: "Desktop - WIPE SAVED DATA · ${{ inputs.guest_username }}"
 
 # Permanently deletes ONE user's saved data volume, without touching any
 # desktop. Separate from DESTROY on purpose: destroy ends a session and keeps

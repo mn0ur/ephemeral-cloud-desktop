@@ -1,4 +1,7 @@
 name: Desktop - DESTROY
+# One label per user: the panel shows a user ONLY their own run and matches
+# on this name (panel/lib/desktops.js runBelongsTo).
+run-name: "Desktop - DESTROY · ${{ inputs.guest_username || 'owner' }}"
 
 on:
   workflow_dispatch:
@@ -107,6 +110,32 @@ jobs:
       # is touched here, which is the entire reason they are separate stacks.
       # A guest's own data volume (terraform/main.tf's guest_data attachment)
       # is likewise never destroyed here - only detached, same as the owner's.
+      - name: Release a stale Terraform lock left by a killed run
+        if: inputs.guest_username != ''
+        run: |
+          # A run killed by timeout-minutes (a spot request that never filled,
+          # 2026-09-14) leaves its S3 lock behind, and every later start or
+          # destroy for that user then fails "Error acquiring the state lock"
+          # forever - guest arqqin was locked out for a day. This job holds the
+          # per-user concurrency group, so no other start/destroy for this user
+          # can be running; a lock older than the longest job timeout (25 min)
+          # is orphaned. The reaper's own locks last seconds to minutes.
+          set -uo pipefail
+          KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+          if [ "${{ inputs.region }}" != "ap-south-1" ]; then
+            KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
+          fi
+          BUCKET=ephemeral-desktop-643902831477-tfstate
+          LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
+          CREATED=$(echo "$LOCK" | jq -r '.Created' | cut -d. -f1)
+          AGE=$(( $(date -u +%s) - $(date -u -d "${CREATED}Z" +%s) ))
+          if [ "$AGE" -gt 1800 ]; then
+            aws s3 rm "s3://$BUCKET/$KEY.tflock" --region me-central-1
+            echo "::warning::removed an orphaned Terraform lock (${AGE}s old) on $KEY"
+          else
+            echo "lock on $KEY is ${AGE}s old - leaving it; terraform -lock-timeout will wait"
+          fi
+
       - name: terraform destroy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

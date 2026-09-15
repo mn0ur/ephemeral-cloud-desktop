@@ -5,6 +5,7 @@ import {
 import { runProgress, tokenConfigured } from "../lib/github.js";
 import {
   refreshOwn, activeCount, MAX_CONCURRENT, HOURLY_USD, HOURLY_USD_WINDOWS, DESKTOP_DOMAIN, REGIONS,
+  sessionPhase, canCancel,
 } from "../lib/desktops.js";
 
 export default async function handler(req, res) {
@@ -37,12 +38,15 @@ export default async function handler(req, res) {
     if (session && (mine || session.is_admin)) visible[uname] = { ...s };
   }
 
-  const mine = session ? sessions[session.user_id] || null : null;
-  const watching = ["pending", "ready"];
-  const worthProgress =
-    session &&
-    (watching.includes(mine?.status) ||
-      (session.is_admin && Object.values(sessions).some((s) => watching.includes(s.status))));
+  // The page renders from `phase` - never from raw status - so a start that
+  // has not produced a machine yet can never be drawn as an existing one.
+  const own = session ? sessions[session.user_id] || null : null;
+  const phase = sessionPhase(own);
+  const mine = own ? { ...own, phase, can_cancel: canCancel(own) } : null;
+  // Progress is the caller's OWN run for the action in flight, anchored on
+  // when that action was dispatched; nobody else's run is ever shown here.
+  const worthProgress = Boolean(session) && ["starting", "booting", "destroying"].includes(phase);
+  const anchor = phase === "destroying" ? own?.destroy_dispatched_at : own?.dispatched_at;
 
   const out = {
     google_client_id: GOOGLE_CLIENT_ID,
@@ -58,7 +62,7 @@ export default async function handler(req, res) {
     // Two GitHub API calls - only when something is actually mid-flight. A
     // settled panel has nothing to report, and polling the Actions API every
     // few seconds forever would burn rate limit for no reason.
-    progress: worthProgress ? await runProgress() : null,
+    progress: worthProgress ? await runProgress(session.user_id, anchor) : null,
     has_saved_data: session ? await hasSavedData(session.user_id) : false,
   };
 

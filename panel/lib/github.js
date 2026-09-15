@@ -4,6 +4,8 @@
 // browser. A page that called the GitHub API directly would have to embed it
 // in JavaScript, handing it to anyone who opened devtools.
 
+import { runBelongsTo } from "./desktops.js";
+
 const REPO = process.env.GH_REPO || "mn0ur/ephemeral-cloud-desktop";
 const TOKEN = process.env.GH_TOKEN || "";
 
@@ -51,10 +53,14 @@ export async function dispatch(workflowFile, inputs) {
 // Live step-by-step state of the most recent desktop run, so a start that takes
 // minutes is followable instead of a spinner indistinguishable from a hang, and
 // a failure names the step that failed.
-export async function runProgress() {
+// Only the caller's own run for the action in flight (see runBelongsTo):
+// showing the newest desktop run of anyone made a new user's Start look like
+// an already-finished machine. 20, not 5: with several users active the
+// caller's run is not guaranteed to be among the newest five.
+export async function runProgress(username, sinceTs) {
   try {
-    const runs = (await gh(`/repos/${REPO}/actions/runs?per_page=5`)).workflow_runs || [];
-    const run = runs.find((r) => (r.name || "").toUpperCase().includes("DESKTOP"));
+    const runs = (await gh(`/repos/${REPO}/actions/runs?per_page=20`)).workflow_runs || [];
+    const run = runs.find((r) => runBelongsTo(r, username, sinceTs));
     if (!run) return null;
     const jobs = (await gh(`/repos/${REPO}/actions/runs/${run.id}/jobs`)).jobs || [];
     const steps = [];

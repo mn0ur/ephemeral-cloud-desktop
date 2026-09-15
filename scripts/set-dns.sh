@@ -16,8 +16,8 @@
 # The zone is passed EXPLICITLY by the caller. It used to be derived as
 # "${FQDN#*.}" - strip one label - which is right for desk.mnour.sd (-> mnour.sd)
 # and silently wrong the moment a hostname gained a third label:
-# mnuowr.desktop.mnour.dev derived "desktop.mnour.dev", which is not a zone, and
-# the first real per-user desktop died with "FATAL: zone desktop.mnour.dev not
+# mnuowr.desktop.sihaab.com derived "desktop.sihaab.com", which is not a zone, and
+# the first real per-user desktop died with "FATAL: zone desktop.sihaab.com not
 # found" AFTER its EC2 instance was already running and billing.
 #
 # Terraform knows the zone (var.cloudflare_zone) so there is no reason to

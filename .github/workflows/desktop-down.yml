@@ -132,11 +132,11 @@ jobs:
           terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
           terraform -chdir=terraform destroy -auto-approve -input=false -lock-timeout=180s
 
-      - name: Tell desktop.mnour.dev this username is free
+      - name: Tell desktop.sihaab.com this username is free
         if: inputs.guest_username != ''
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
-          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
         run: |
           if [ -z "$HUB_CALLBACK_SECRET" ]; then
             echo "::warning::HUB_CALLBACK_SECRET not set - the control panel will not learn this session ended until its next status poll notices /healthz stopped answering."

@@ -5,8 +5,8 @@ that boots on AWS in minutes, streams to any browser, and costs **~$1.90/month
 when nobody's using it.** One click to start, one click to destroy — your
 files, apps, and settings survive every teardown.
 
-**Live:** [desktop.mnour.dev](https://desktop.mnour.dev) — self-service panel with Google sign-in
-**Admin console:** `admin.desktop.mnour.dev` — tiers, guest limits, live session state
+**Live:** [desktop.sihaab.com](https://desktop.sihaab.com) — self-service panel with Google sign-in
+**Admin console:** `admin.sihaab.com` — tiers, guest limits, live session state
 
 ---
 
@@ -26,8 +26,8 @@ this repo actually documents.
 ```
                           ┌─────────────────────────┐
    Browser ───HTTPS──────▶│  Vercel (serverless)     │
-                          │  desktop.mnour.dev       │
-                          │  admin.desktop.mnour.dev │
+                          │  desktop.sihaab.com       │
+                          │  admin.sihaab.com │
                           │  Google Sign-In auth     │
                           └────────────┬─────────────┘
                                        │ workflow_dispatch
@@ -148,7 +148,7 @@ always reads workflow *files* from the ref being run, and the feature branch
 containing that input hadn't been merged. The panel and the infra it drives
 can silently drift out of sync the moment one deploys faster than the other.
 
-**The admin console served the guest panel instead.** `admin.desktop.mnour.dev`
+**The admin console served the guest panel instead.** `admin.sihaab.com`
 was rewritten to `/admin.html` at the same path (`/`) as the main panel — and
 Vercel's CDN cache key is **path-only, not `Host`-varying**, so the two
 domains collided and one served the other's cached response
@@ -232,7 +232,7 @@ resetting both sides explicitly rather than guessing which one was wrong.
 
 Windows Server 2025 (the Windows 11 24H2 shell), streamed via Amazon DCV,
 available only to admins from the same panel and the same `os` selector on
-`desktop.mnour.dev`.
+`desktop.sihaab.com`.
 
 - **How it works:** a baked AMI (`Variant=windows`) boots into an
   already-logged-in desktop. DCV listens on `127.0.0.1:8443`; **Caddy on 443
@@ -241,7 +241,7 @@ available only to admins from the same panel and the same `os` selector on
   DNS-only (not Cloudflare-proxied) — a direct Cloudflare proxy throttled DCV
   to 1 fps / 300 ms versus 8 fps / 78 ms direct, so Caddy fronts it exactly
   the way the Linux desktops already do.
-- **URL shape:** `https://<username>-desktop.mnour.dev` — single-label, so
+- **URL shape:** `https://<username>-desktop.sihaab.com` — single-label, so
   the free Cloudflare Universal SSL wildcard (`*.mnour.dev`) covers it; a
   two-level hostname does not.
 - **Cost:** `c7i.xlarge` (4 vCPU) spot, ~$0.204/hr Mumbai. The Windows

@@ -59,7 +59,7 @@ if [ -n "$CF_DNS_TOKEN" ]; then
   # for a binary with the Cloudflare module compiled in - no local Go
   # toolchain needed, no xcaddy. Falls back to the stock apt package (plain
   # HTTP-01, exactly as before this variable existed) when no token is
-  # supplied, which is always true for the owner's own desk.mnour.dev today.
+  # supplied, which is always true for the owner's own desk.sihaab.com today.
   # Detected, not hardcoded: instance_type is user-configurable, and
   # hardcoding this exact call on the hub's own script downloaded an
   # amd64 binary for a Graviton (ARM) instance - it fetched fine, and

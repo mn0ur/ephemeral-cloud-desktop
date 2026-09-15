@@ -94,22 +94,22 @@ variable "root_volume_gb_gpu" {
 variable "hostname" {
   description = "Public hostname served by Caddy with automatic TLS."
   type        = string
-  default     = "desk.mnour.dev"
+  default     = "desk.sihaab.com"
 }
 
 variable "cloudflare_zone" {
   description = <<-EOT
     Cloudflare zone the hostname belongs to.
 
-    mnour.dev, not mnour.sd - moved 2026-08-09. mnour.sd's zone sits in the
-    "Penstash Account", where this project's role is Limited Account-Level
-    Access, which cannot enable Cloudflare Access / Zero Trust. mnour.dev is
-    in the owner's own, fully-administered account, which is the entire
-    reason for the move - the desktop is internet-facing behind nothing but
-    Caddy basic auth today, and Access is how that gets fixed.
+    sihaab.com since 2026-09-13 (the product's domain; the panel is
+    desktop.sihaab.com and the admin console admin.sihaab.com). Before that
+    mnour.dev (2026-08-09 .. 2026-09-13), and mnour.sd before that. The zone
+    must be in a Cloudflare account this project's token fully administers,
+    and the same token is the CLOUDFLARE_API_TOKEN GitHub secret that
+    scripts/set-dns.sh uses on every start.
   EOT
   type        = string
-  default     = "mnour.dev"
+  default     = "sihaab.com"
 }
 
 variable "enable_instance_role" {
@@ -337,13 +337,13 @@ variable "web_password_override" {
 }
 
 # ---------------------------------------------------------------------------
-# Guest self-service desktops - desktop.mnour.dev.
+# Guest self-service desktops - desktop.sihaab.com.
 #
 # Empty username (default) is the owner's original single desktop at
-# desk.mnour.dev, byte-identical to before this section existed - nothing
+# desk.sihaab.com, byte-identical to before this section existed - nothing
 # about it changes unless a workflow explicitly passes a username.
 #
-# Any other value provisions <username>.desktop.mnour.dev. There is no fixed
+# Any other value provisions <username>.desktop.sihaab.com. There is no fixed
 # slot count any more - concurrency is capped (currently 5) by the control
 # panel counting active sessions before it will dispatch a new one, since
 # with per-user state keys there is no structural "only N slots exist" limit
@@ -352,10 +352,10 @@ variable "web_password_override" {
 
 variable "username" {
   description = <<-EOT
-    "" (default): the owner's own desktop, desk.mnour.dev - unchanged.
+    "" (default): the owner's own desktop, desk.sihaab.com - unchanged.
 
-    Anything else: a per-user desktop at <username>.desktop.mnour.dev (a
-    Windows session instead uses <username>-desktop.mnour.dev, single-label
+    Anything else: a per-user desktop at <username>.desktop.sihaab.com (a
+    Windows session instead uses <username>-desktop.sihaab.com, single-label
     under the zone - see effective_hostname in main.tf). Must
     be a single valid DNS label - lowercase letters, digits, hyphens, no
     leading/trailing hyphen, 63 chars max. The control panel derives this

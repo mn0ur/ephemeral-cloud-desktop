@@ -60,7 +60,7 @@ on:
         type: boolean
         default: false
       use_spot:
-        description: "Spot is ~4x cheaper but can be unfulfillable - c7i.xlarge in ap-south-1c had no capacity twice on 2026-08-25, and a spot request that is never fulfilled just hangs the apply until the job timeout. Set false to retry the same session on-demand instead of waiting for capacity."
+        description: "Linux only - Windows is always on-demand (terraform local.spot). Spot is ~2.5x cheaper for Linux but can have no capacity; the apply then retries on-demand by itself. Set false to skip spot entirely."
         type: boolean
         default: true
       os:
@@ -232,6 +232,17 @@ jobs:
           echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
           echo "::add-mask::$GUEST_PASSWORD"
 
+      - name: Per-session reclaim token
+        if: inputs.guest_username != ''
+        run: |
+          # Generated HERE, never a workflow_dispatch input (public repo). The
+          # machine gets it through user_data and uses it to report a spot
+          # reclaim to the panel (panel/api/session-lost.js); the panel is
+          # handed it once in session-ready and keeps only a hash.
+          T=$(openssl rand -hex 24)
+          echo "::add-mask::$T"
+          echo "TF_VAR_session_token=$T" >> "$GITHUB_ENV"
+
       - name: Release a stale Terraform lock left by a killed run
         if: inputs.guest_username != ''
         run: |
@@ -277,6 +288,7 @@ jobs:
           TF_VAR_instance_type_windows: ${{ inputs.instance_type_windows }}
           TF_VAR_region: ${{ inputs.region }}
           TF_VAR_az_suffix: ${{ env.AZ_SUFFIX }}
+          TF_VAR_panel_url: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
@@ -295,6 +307,40 @@ jobs:
           # "someone else holds the lock for 4 more seconds" should be a wait,
           # not a hard error that leaves the user staring at a failed run.
           terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
+          if terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s 2>&1 | tee /tmp/apply.log; then
+            exit 0
+          fi
+
+          # Spot first, on-demand if there is no spot capacity. The aws_instance
+          # create timeout (5m, terraform/main.tf) turns "no capacity" from a
+          # 25-minute hang into this failure. Only for Linux spot: Windows is
+          # never spot, and any other error is a real error, not a retry.
+          if [ "${{ inputs.os }}" = "windows" ] || [ "$TF_VAR_use_spot" != "true" ] || \
+             ! grep -qiE "InsufficientInstanceCapacity|capacity|timeout while waiting|context deadline exceeded" /tmp/apply.log; then
+            exit 1
+          fi
+          echo "::warning::no spot capacity - retrying on a regular on-demand machine"
+
+          # Anything the spot attempt left half-made must not start billing
+          # later: an open spot request for this session's own security group,
+          # and a pending instance tagged to this user (the panel and the
+          # per-user concurrency group guarantee they have no other).
+          SG=$(terraform -chdir=terraform state show -no-color aws_security_group.session_access 2>/dev/null \
+            | awk -F'"' '/^ *id *=/ {print $2; exit}')
+          if [ -n "$SG" ]; then
+            REQS=$(aws ec2 describe-spot-instance-requests --filters "Name=state,Values=open" "Name=launch.group-id,Values=$SG" \
+              --query 'SpotInstanceRequests[].SpotInstanceRequestId' --output text 2>/dev/null || true)
+            [ -n "$REQS" ] && [ "$REQS" != "None" ] && aws ec2 cancel-spot-instance-requests --spot-instance-request-ids $REQS || true
+          fi
+          if [ -n "${{ inputs.guest_username }}" ]; then
+            STRAY=$(aws ec2 describe-instances --filters "Name=tag:Owner,Values=${{ inputs.guest_username }}" \
+              "Name=instance-state-name,Values=pending,running" "Name=instance-lifecycle,Values=spot" \
+              --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)
+            [ -n "$STRAY" ] && [ "$STRAY" != "None" ] && aws ec2 terminate-instances --instance-ids $STRAY || true
+          fi
+
+          export TF_VAR_use_spot=false
+          echo "TF_VAR_use_spot=false" >> "$GITHUB_ENV"
           terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s
 
       - name: Tell desktop.sihaab.com the guest session is ready
@@ -315,6 +361,7 @@ jobs:
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)
           INSTANCE_ID=$(terraform -chdir=terraform output -raw instance_id)
           LOGIN_USER=$(terraform -chdir=terraform output -raw login_user)
+          MARKET=$(terraform -chdir=terraform output -raw market)
           LAUNCHED_AT=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
             --query 'Reservations[0].Instances[0].LaunchTime' --output text | \
             xargs -I{} date -u -d {} +%s)
@@ -337,7 +384,10 @@ jobs:
             --arg login_user "$LOGIN_USER" \
             --arg os "${{ inputs.os }}" \
             --arg region "${{ inputs.region }}" \
-            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber), login_user:$login_user, os:$os, region:$region}')
+            --arg market "$MARKET" \
+            --arg instance_id "$INSTANCE_ID" \
+            --arg session_token "${TF_VAR_session_token:-}" \
+            '{username:$username, url:$url, password:$password, owner_email:$owner_email, launched_at:($launched_at|tonumber), login_user:$login_user, os:$os, region:$region, market:$market, instance_id:$instance_id, session_token:$session_token}')
           curl -fsS -X POST "$PANEL_URL/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \

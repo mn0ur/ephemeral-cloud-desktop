@@ -1,11 +1,11 @@
 import { sessionFromRequest, GOOGLE_CLIENT_ID } from "../lib/auth.js";
 import {
-  loadSessions, putSession, dropSession, hasSavedData, stateConfigured,
+  loadSessions, putSession, dropSession, hasSavedData, stateConfigured, getNotice,
 } from "../lib/state.js";
 import { runProgress, tokenConfigured } from "../lib/github.js";
 import {
   refreshOwn, activeCount, MAX_CONCURRENT, HOURLY_USD, HOURLY_USD_WINDOWS, DESKTOP_DOMAIN, REGIONS,
-  sessionPhase, canCancel,
+  sessionPhase, canCancel, hourlyRate,
 } from "../lib/desktops.js";
 
 export default async function handler(req, res) {
@@ -35,14 +35,19 @@ export default async function handler(req, res) {
   const visible = {};
   for (const [uname, s] of Object.entries(sessions)) {
     const mine = session && session.user_id === uname;
-    if (session && (mine || session.is_admin)) visible[uname] = { ...s };
+    if (session && (mine || session.is_admin)) {
+      const { lost_token_hash: _h, ...pub } = s;
+      visible[uname] = pub;
+    }
   }
 
   // The page renders from `phase` - never from raw status - so a start that
   // has not produced a machine yet can never be drawn as an existing one.
   const own = session ? sessions[session.user_id] || null : null;
   const phase = sessionPhase(own);
-  const mine = own ? { ...own, phase, can_cancel: canCancel(own) } : null;
+  // lost_token_hash stays server-side; the page never needs it.
+  const { lost_token_hash: _h, ...ownPublic } = own || {};
+  const mine = own ? { ...ownPublic, phase, can_cancel: canCancel(own), hourly_usd: hourlyRate(own.os, own.market) } : null;
   // Progress is the caller's OWN run for the action in flight, anchored on
   // when that action was dispatched; nobody else's run is ever shown here.
   const worthProgress = Boolean(session) && ["starting", "booting", "destroying"].includes(phase);
@@ -64,6 +69,7 @@ export default async function handler(req, res) {
     // few seconds forever would burn rate limit for no reason.
     progress: worthProgress ? await runProgress(session.user_id, anchor, phase === "destroying" ? "DESTROY" : "START") : null,
     has_saved_data: session ? await hasSavedData(session.user_id) : false,
+    notice: session && !own ? await getNotice(session.user_id) : null,
   };
 
   if (!tokenConfigured) {

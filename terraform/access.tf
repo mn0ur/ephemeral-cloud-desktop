@@ -21,6 +21,14 @@ locals {
 
   windows = var.os == "windows"
 
+  # Windows is never spot. AWS reclaimed a Windows spot machine 22 minutes
+  # into a session (2026-09-15), and spot saves little on Windows because the
+  # per-vCPU licence is not discounted ($0.204 spot vs $0.3625 on-demand).
+  # Linux stays spot-first; desktop-up.yml retries on-demand if there is no
+  # capacity. Decided here, not in the workflow, so up, down and the reaper
+  # all evaluate the same configuration.
+  spot = var.use_spot && !local.windows
+
   # Proxied only when Access is on - for BOTH OSes. Windows was forced through
   # Cloudflare's proxy at first (DCV's own certificate is self-signed) and the
   # proxy throttled the stream to 1 fps / 300 ms against 8 fps / 78 ms direct

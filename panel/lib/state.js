@@ -44,6 +44,7 @@ const K = {
   admins: "admins",             // set: emails with full admin access
   permanentUsers: "permanent_users", // set: emails allowed to persist data
   config: "config",             // hash: guest_limit_minutes, etc.
+  notices: "notices",           // hash: username -> one message for their next visit
 };
 
 // -- sessions ---------------------------------------------------------------
@@ -209,4 +210,21 @@ export async function setGuestLimitMinutes(n) {
   await requireRedis().hset(K.config, { guest_limit_minutes: String(minutes) });
   await logEvent("guest_limit_changed", { minutes });
   return minutes;
+}
+
+// -- notices ---------------------------------------------------------------
+
+// One message waiting for a user's next look at the panel - e.g. that AWS
+// reclaimed their machine while they were away. Cleared when they start again
+// rather than on first read, because the page polls and would lose it at once.
+export async function setNotice(username, text) {
+  await requireRedis().hset(K.notices, { [username]: String(text) });
+}
+
+export async function getNotice(username) {
+  return (await requireRedis().hget(K.notices, username)) || null;
+}
+
+export async function clearNotice(username) {
+  await requireRedis().hdel(K.notices, username);
 }

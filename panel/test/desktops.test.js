@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   hourlyRate, requestedOs, probeUrl, HOURLY_USD, HOURLY_USD_WINDOWS, requestedRegion, REGIONS,
   sessionPhase, canCancel, CANCEL_AFTER_S, runBelongsTo,
+  HOURLY_USD_ONDEMAND, UNREACHABLE_AFTER_S, HEALTH_EVERY_S, healthCheckDue, applyHealth,
+  hashToken, tokenMatches,
 } from "../lib/desktops.js";
 
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
@@ -81,4 +83,48 @@ test("runBelongsTo: only this user's run for this action, not a user whose name 
   // an earlier run of the same user from before this action is not "this" one
   assert.equal(runBelongsTo(run("Desktop - START · mohd-muj-mam · linux", "2026-09-15T13:47:00Z"), "mohd-muj-mam", since), false);
   assert.equal(runBelongsTo(mine, "mohd-muj-mam", undefined), true);
+});
+
+test("hourlyRate: what the machine actually costs - Windows always on-demand, Linux by market", () => {
+  assert.equal(hourlyRate("linux", "spot"), HOURLY_USD);
+  assert.equal(hourlyRate("linux", "on-demand"), HOURLY_USD_ONDEMAND);
+  assert.equal(hourlyRate("windows", "spot"), HOURLY_USD_WINDOWS); // never spot, whatever is claimed
+  assert.equal(HOURLY_USD_WINDOWS, 0.3625);
+  assert.equal(HOURLY_USD_ONDEMAND, 0.1785);
+});
+
+test("sessionPhase: a running desktop that stopped answering becomes unreachable, not 'Running'", () => {
+  const t0 = 1_800_000_000;
+  const s = { status: "active", unreachable_since: t0 };
+  assert.equal(sessionPhase(s, t0 + 10), "running"); // one blip is not a verdict
+  assert.equal(sessionPhase(s, t0 + UNREACHABLE_AFTER_S), "unreachable");
+  assert.equal(sessionPhase({ status: "active" }, t0), "running");
+  // a cleanup already dispatched wins over everything
+  assert.equal(sessionPhase({ ...s, destroy_dispatched_at: t0 }, t0 + 999), "destroying");
+});
+
+test("healthCheckDue/applyHealth: re-probe a running desktop every HEALTH_EVERY_S and track since when it is down", () => {
+  const t0 = 1_800_000_000;
+  assert.equal(healthCheckDue({ status: "active" }, t0), true);
+  assert.equal(healthCheckDue({ status: "active", checked_at: t0 }, t0 + HEALTH_EVERY_S - 1), false);
+  assert.equal(healthCheckDue({ status: "active", checked_at: t0 }, t0 + HEALTH_EVERY_S), true);
+  assert.equal(healthCheckDue({ status: "ready" }, t0), false);
+  assert.equal(healthCheckDue({ status: "active", destroy_dispatched_at: t0 }, t0 + 999), false);
+  const down1 = applyHealth({ status: "active" }, false, t0);
+  assert.equal(down1.unreachable_since, t0);
+  const down2 = applyHealth(down1, false, t0 + 30);
+  assert.equal(down2.unreachable_since, t0); // keeps the FIRST failure
+  const back = applyHealth(down2, true, t0 + 60);
+  assert.equal(back.unreachable_since, undefined);
+  assert.equal(back.checked_at, t0 + 60);
+});
+
+test("tokenMatches: only the exact per-session token proves a reclaim notice", () => {
+  const h = hashToken("a".repeat(48));
+  assert.equal(tokenMatches("a".repeat(48), h), true);
+  assert.equal(tokenMatches("b".repeat(48), h), false);
+  assert.equal(tokenMatches("", h), false);
+  assert.equal(tokenMatches(undefined, h), false);
+  assert.equal(tokenMatches("a".repeat(48), undefined), false);
+  assert.notEqual(h, "a".repeat(48)); // stored hashed, never raw
 });

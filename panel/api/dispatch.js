@@ -1,6 +1,6 @@
 import { sessionFromRequest } from "../lib/auth.js";
 import {
-  loadSessions, putSession, dropSession, setHasData, hasSavedData, logEvent,
+  loadSessions, putSession, dropSession, setHasData, hasSavedData, logEvent, clearNotice,
 } from "../lib/state.js";
 import { dispatch, WORKFLOWS, tokenConfigured } from "../lib/github.js";
 import { activeCount, MAX_CONCURRENT, requestedOs, requestedRegion } from "../lib/desktops.js";
@@ -82,6 +82,7 @@ export default async function handler(req, res) {
     // Only after a successful dispatch: claiming data exists when the start
     // never ran would show a delete button for nothing.
     if (persist) await setHasData(me, true);
+    await clearNotice(me);
     return res.status(202).json({ ok: true });
   }
 

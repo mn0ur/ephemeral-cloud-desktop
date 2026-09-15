@@ -1,5 +1,7 @@
 // Desktop liveness and session reconciliation.
 
+import crypto from "node:crypto";
+
 export const DESKTOP_DOMAIN = process.env.DESKTOP_DOMAIN || "desktop.sihaab.com";
 export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
 // c7i.xlarge spot in me-central-1a, measured 2026-08-25. Keep in step with
@@ -11,15 +13,19 @@ export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
 // per-session notion of instance type yet. Worth wiring through before GPU
 // sessions are offered to anyone but the operator.
 export const HOURLY_USD = Number(process.env.HOURLY_USD || 0.0529);
-// Windows on the same instance class is ~2x: the Windows licence is priced
-// per vCPU and spot does not discount it. m6i.large (2 vCPU) Windows spot in
-// ap-south-1, measured 2026-09-11. Keep in step with
-// terraform/variables.tf instance_type_windows.
-export const HOURLY_USD_WINDOWS = Number(process.env.HOURLY_USD_WINDOWS || 0.204);
+// Linux on-demand, used when spot had no capacity and the start fell back
+// (desktop-up.yml). c7i.xlarge ap-south-1, AWS Price List 2026-09-15.
+export const HOURLY_USD_ONDEMAND = Number(process.env.HOURLY_USD_ONDEMAND || 0.1785);
+// Windows is ALWAYS on-demand (terraform local.spot): AWS reclaimed a Windows
+// spot machine 22 minutes into a session on 2026-09-15, and spot barely
+// discounts Windows anyway because the licence part is not discounted
+// (spot ~0.204). c7i.xlarge Windows ap-south-1, AWS Price List 2026-09-15.
+export const HOURLY_USD_WINDOWS = Number(process.env.HOURLY_USD_WINDOWS || 0.3625);
 export const PENDING_TIMEOUT_S = 10 * 60;
 
-export function hourlyRate(os) {
-  return os === "windows" ? HOURLY_USD_WINDOWS : HOURLY_USD;
+export function hourlyRate(os, market) {
+  if (os === "windows") return HOURLY_USD_WINDOWS;
+  return market === "on-demand" ? HOURLY_USD_ONDEMAND : HOURLY_USD;
 }
 
 // Every tier chooses its OS at Start (owner decision 2026-09-15: guests,
@@ -36,11 +42,13 @@ export function requestedOs(bodyOs) {
 // existing machine with "Password not recorded - this desktop was recovered",
 // and a new user destroyed their own start twice believing a machine had
 // already been running before they arrived (2026-09-15).
-export function sessionPhase(s) {
+export function sessionPhase(s, now = Date.now() / 1000) {
   if (!s) return null;
   if (s.destroy_dispatched_at) return "destroying";
   if (s.status === "error") return "error";
-  if (s.status === "active") return "running";
+  if (s.status === "active") {
+    return s.unreachable_since && now - s.unreachable_since >= UNREACHABLE_AFTER_S ? "unreachable" : "running";
+  }
   if (s.status === "ready") return "booting";
   return "starting";
 }
@@ -49,6 +57,39 @@ export function sessionPhase(s) {
 // only queues behind the apply anyway, and an immediate Cancel is almost
 // always a misread of the screen, not an intent.
 export const CANCEL_AFTER_S = 60;
+
+// A running desktop is re-probed every HEALTH_EVERY_S and called unreachable
+// after UNREACHABLE_AFTER_S of failures. Once "active" nothing used to look
+// again, so a machine AWS had reclaimed showed "Running" with an Open button
+// for as long as anyone cared to look (2026-09-15). 3 minutes, not one probe:
+// a Windows restart or a network blip must not read as a lost machine.
+export const HEALTH_EVERY_S = 30;
+export const UNREACHABLE_AFTER_S = 180;
+
+export function healthCheckDue(s, now = Date.now() / 1000) {
+  if (!s || s.status !== "active" || s.destroy_dispatched_at) return false;
+  return now - (Number(s.checked_at) || 0) >= HEALTH_EVERY_S;
+}
+
+export function applyHealth(s, up, now = Date.now() / 1000) {
+  const next = { ...s, checked_at: now };
+  if (up) delete next.unreachable_since;
+  else next.unreachable_since = s.unreachable_since || now;
+  return next;
+}
+
+// The per-session reclaim token (desktop-up.yml -> the machine and
+// session-ready). Only its hash is stored; the raw value lives on the machine.
+export function hashToken(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+export function tokenMatches(token, storedHash) {
+  if (!token || !storedHash) return false;
+  const a = Buffer.from(hashToken(token));
+  const b = Buffer.from(String(storedHash));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 export function canCancel(s, now = Date.now() / 1000) {
   const phase = sessionPhase(s);
@@ -143,7 +184,11 @@ export async function refreshOwn(sessions, username, put, drop) {
   if (!s) return sessions;
   if (s.status === "ready" && (await urlUp(probeUrl(s.url, s.os)))) {
     s.status = "active";
+    s.checked_at = Date.now() / 1000;
     await put(username, s);
+  } else if (healthCheckDue(s)) {
+    sessions[username] = applyHealth(s, await urlUp(probeUrl(s.url, s.os)));
+    await put(username, sessions[username]);
   } else if (
     s.status === "pending" &&
     Date.now() / 1000 - (s.dispatched_at || Date.now() / 1000) > PENDING_TIMEOUT_S

@@ -20,6 +20,64 @@ set -euxo pipefail
 exec > >(tee -a /var/log/desktop-bootstrap.log) 2>&1
 echo "=== bootstrap start $(date -Is) ==="
 
+# ---------------------------------------------------------------------------
+# Spot reclaim watcher - FIRST, before anything below can fail and exit.
+#
+# AWS gives a spot machine a two-minute warning before taking it back. Nothing
+# listened: on 2026-09-15 a machine vanished mid-session and the panel kept
+# showing "Running" with an Open button onto nothing. This polls the warning
+# and tells the panel, which runs the normal cleanup and tells the user their
+# files are safe. The token authorises exactly that, for this session only.
+# xtrace off while the token is handled, so it never reaches the boot log.
+# ---------------------------------------------------------------------------
+set +x
+if [ "${spot}" = "true" ] && [ -n "${session_token}" ]; then
+  install -m 600 /dev/null /etc/desktop-reclaim.env
+  cat >/etc/desktop-reclaim.env <<RECLAIMENV
+PANEL_URL=${panel_url}
+SESSION_USER=${session_user}
+SESSION_TOKEN=${session_token}
+RECLAIMENV
+  cat >/usr/local/bin/desktop-reclaim-watch <<'WATCH'
+#!/bin/bash
+set -u
+. /etc/desktop-reclaim.env
+IMDS=http://169.254.169.254/latest
+while true; do
+  T=$(curl -fsS -m 2 -X PUT "$IMDS/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null)
+  if curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $T" "$IMDS/meta-data/spot/instance-action" >/dev/null 2>&1; then
+    logger -t desktop-reclaim "spot reclaim notice received - telling the panel"
+    sync
+    for i in 1 2 3 4 5 6; do
+      curl -fsS -m 10 -X POST "$PANEL_URL/api/session-lost" -H "Content-Type: application/json" \
+        -d "{\"username\":\"$SESSION_USER\",\"token\":\"$SESSION_TOKEN\"}" && exit 0
+      sleep 5
+    done
+    exit 0
+  fi
+  sleep 5
+done
+WATCH
+  chmod 755 /usr/local/bin/desktop-reclaim-watch
+  cat >/etc/systemd/system/desktop-reclaim-watch.service <<'UNIT'
+[Unit]
+Description=Tell the control panel when AWS reclaims this spot machine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/desktop-reclaim-watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now desktop-reclaim-watch.service
+fi
+set -x
+
 HOSTNAME_FQDN="${hostname}"
 IMAGE="${image}"
 FRESH="${fresh}"

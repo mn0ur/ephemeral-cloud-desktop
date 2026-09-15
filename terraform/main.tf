@@ -362,7 +362,7 @@ resource "aws_instance" "desktop" {
     # back, and only a panel session has a token to report it with.
     spot          = local.spot ? "true" : "false"
     session_user  = var.username
-    session_token = var.session_token
+    session_token = local.spot ? var.session_token : ""
     panel_url     = var.panel_url
     # A volume is attached for the owner's own desktop always, and for a guest
     # only when they asked to keep their data. The boot script needs to know

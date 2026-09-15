@@ -1,5 +1,5 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
-import { loadSessions, putSession, logEvent, getGuestLimitMinutes } from "../lib/state.js";
+import { loadSessions, putSession, logEvent, getGuestLimitMinutes, clearHealth } from "../lib/state.js";
 import { REGIONS, hashToken } from "../lib/desktops.js";
 
 // Called by desktop-up.yml once terraform apply succeeds. This deployment holds
@@ -54,6 +54,7 @@ export default async function handler(req, res) {
     // down" instead of offering Open on a machine that is about to go.
     ...(prior.destroy_dispatched_at ? { destroy_dispatched_at: prior.destroy_dispatched_at } : {}),
   });
+  await clearHealth(username);
   await logEvent("start", { username, email, url: req.body?.url, os, region });
   return res.status(200).json({ ok: true });
 }

@@ -233,7 +233,7 @@ jobs:
           echo "::add-mask::$GUEST_PASSWORD"
 
       - name: Per-session reclaim token
-        if: inputs.guest_username != ''
+        if: inputs.guest_username != '' && inputs.os != 'windows'
         run: |
           # Generated HERE, never a workflow_dispatch input (public repo). The
           # machine gets it through user_data and uses it to report a spot
@@ -307,38 +307,26 @@ jobs:
           # "someone else holds the lock for 4 more seconds" should be a wait,
           # not a hard error that leaves the user staring at a failed run.
           terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
-          if terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s 2>&1 | tee /tmp/apply.log; then
+          if terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s -no-color 2>&1 | tee /tmp/apply.log; then
             exit 0
           fi
 
           # Spot first, on-demand if there is no spot capacity. The aws_instance
           # create timeout (5m, terraform/main.tf) turns "no capacity" from a
-          # 25-minute hang into this failure. Only for Linux spot: Windows is
-          # never spot, and any other error is a real error, not a retry.
+          # 25-minute hang into this failure. Only for Linux spot, and only
+          # when the ERROR is about capacity: the plan above the error prints
+          # words like capacity_reservation_specification, so the search starts
+          # at the first "Error:" line. Any other failure is a real failure.
           if [ "${{ inputs.os }}" = "windows" ] || [ "$TF_VAR_use_spot" != "true" ] || \
-             ! grep -qiE "InsufficientInstanceCapacity|capacity|timeout while waiting|context deadline exceeded" /tmp/apply.log; then
+             ! sed -n '/Error:/,$p' /tmp/apply.log | grep -qE "InsufficientInstanceCapacity|capacity-not-available|MaxSpotInstanceCountExceeded|timeout while waiting for state to become 'running'|context deadline exceeded"; then
             exit 1
           fi
           echo "::warning::no spot capacity - retrying on a regular on-demand machine"
 
-          # Anything the spot attempt left half-made must not start billing
-          # later: an open spot request for this session's own security group,
-          # and a pending instance tagged to this user (the panel and the
-          # per-user concurrency group guarantee they have no other).
-          SG=$(terraform -chdir=terraform state show -no-color aws_security_group.session_access 2>/dev/null \
-            | awk -F'"' '/^ *id *=/ {print $2; exit}')
-          if [ -n "$SG" ]; then
-            REQS=$(aws ec2 describe-spot-instance-requests --filters "Name=state,Values=open" "Name=launch.group-id,Values=$SG" \
-              --query 'SpotInstanceRequests[].SpotInstanceRequestId' --output text 2>/dev/null || true)
-            [ -n "$REQS" ] && [ "$REQS" != "None" ] && aws ec2 cancel-spot-instance-requests --spot-instance-request-ids $REQS || true
-          fi
-          if [ -n "${{ inputs.guest_username }}" ]; then
-            STRAY=$(aws ec2 describe-instances --filters "Name=tag:Owner,Values=${{ inputs.guest_username }}" \
-              "Name=instance-state-name,Values=pending,running" "Name=instance-lifecycle,Values=spot" \
-              --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)
-            [ -n "$STRAY" ] && [ "$STRAY" != "None" ] && aws ec2 terminate-instances --instance-ids $STRAY || true
-          fi
-
+          # No hand-rolled cleanup: a create that timed out is saved in state
+          # as tainted, and this apply destroys it before creating the
+          # on-demand machine. (Terminating by tag was tried in review and
+          # could match the owner's own desktop - Owner is a default tag.)
           export TF_VAR_use_spot=false
           echo "TF_VAR_use_spot=false" >> "$GITHUB_ENV"
           terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s

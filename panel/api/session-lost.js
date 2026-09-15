@@ -1,4 +1,4 @@
-import { loadSessions, putSession, logEvent, setNotice } from "../lib/state.js";
+import { loadSessions, putSession, logEvent, setNotice, claimOnce, releaseClaim } from "../lib/state.js";
 import { dispatch, WORKFLOWS } from "../lib/github.js";
 import { tokenMatches } from "../lib/desktops.js";
 
@@ -22,15 +22,26 @@ export default async function handler(req, res) {
   if (!s || !tokenMatches(req.body?.token, s.lost_token_hash)) {
     return res.status(403).json({ error: "not this session" });
   }
-  // The watcher retries; one cleanup is enough.
   if (s.destroy_dispatched_at) return res.status(200).json({ ok: true, already: true });
 
-  await dispatch(WORKFLOWS.destroy, {
-    confirm: "DESTROY",
-    guest_username: username,
-    os: s.os || "linux",
-    region: s.region || "ap-south-1",
-  });
+  // The watcher retries and requests can overlap; exactly one cleanup runs.
+  // Keyed on the token hash, so a later session's own reclaim is never
+  // mistaken for this one.
+  const claim = `lost:${username}:${s.lost_token_hash.slice(0, 16)}`;
+  if (!(await claimOnce(claim, 900))) return res.status(200).json({ ok: true, already: true });
+
+  try {
+    await dispatch(WORKFLOWS.destroy, {
+      confirm: "DESTROY",
+      guest_username: username,
+      os: s.os || "linux",
+      region: s.region || "ap-south-1",
+    });
+  } catch (e) {
+    // Let the watcher's next retry try again.
+    await releaseClaim(claim);
+    return res.status(502).json({ error: "could not start cleanup" });
+  }
   const now = Date.now() / 1000;
   await putSession(username, { ...s, destroy_dispatched_at: now, lost_at: now });
   await setNotice(

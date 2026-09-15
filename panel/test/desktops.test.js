@@ -10,7 +10,7 @@ import {
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
   assert.equal(hourlyRate("linux"), HOURLY_USD);
   assert.equal(hourlyRate(undefined), HOURLY_USD);
-  assert.equal(hourlyRate("windows"), HOURLY_USD_WINDOWS);
+  assert.equal(hourlyRate("windows", "on-demand"), HOURLY_USD_WINDOWS);
   assert.ok(HOURLY_USD_WINDOWS > HOURLY_USD);
 });
 
@@ -88,8 +88,10 @@ test("runBelongsTo: only this user's run for this action, not a user whose name 
 test("hourlyRate: what the machine actually costs - Windows always on-demand, Linux by market", () => {
   assert.equal(hourlyRate("linux", "spot"), HOURLY_USD);
   assert.equal(hourlyRate("linux", "on-demand"), HOURLY_USD_ONDEMAND);
-  assert.equal(hourlyRate("windows", "spot"), HOURLY_USD_WINDOWS); // never spot, whatever is claimed
+  assert.equal(hourlyRate("windows", "on-demand"), HOURLY_USD_WINDOWS);
   assert.equal(HOURLY_USD_WINDOWS, 0.3625);
+  // Windows sessions from before this change were spot and bill the spot rate
+  assert.equal(hourlyRate("windows", undefined), 0.204);
   assert.equal(HOURLY_USD_ONDEMAND, 0.1785);
 });
 

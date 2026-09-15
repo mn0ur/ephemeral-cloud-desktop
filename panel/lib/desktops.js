@@ -21,10 +21,13 @@ export const HOURLY_USD_ONDEMAND = Number(process.env.HOURLY_USD_ONDEMAND || 0.1
 // discounts Windows anyway because the licence part is not discounted
 // (spot ~0.204). c7i.xlarge Windows ap-south-1, AWS Price List 2026-09-15.
 export const HOURLY_USD_WINDOWS = Number(process.env.HOURLY_USD_WINDOWS || 0.3625);
+// Only for Windows sessions started before Windows went on-demand (no market
+// recorded); session-ready records every new Windows session as on-demand.
+export const HOURLY_USD_WINDOWS_SPOT = 0.204;
 export const PENDING_TIMEOUT_S = 10 * 60;
 
 export function hourlyRate(os, market) {
-  if (os === "windows") return HOURLY_USD_WINDOWS;
+  if (os === "windows") return market === "on-demand" ? HOURLY_USD_WINDOWS : HOURLY_USD_WINDOWS_SPOT;
   return market === "on-demand" ? HOURLY_USD_ONDEMAND : HOURLY_USD;
 }
 
@@ -179,22 +182,30 @@ export function activeCount(sessions) {
 // Probes only the CALLER's own desktop, not every registered user. The hub
 // probed everyone on every poll, which is what made its status endpoint take
 // 13 seconds - and here it would blow the function time limit outright.
-export async function refreshOwn(sessions, username, put, drop) {
+export async function refreshOwn(sessions, username, store) {
   const s = sessions[username];
   if (!s) return sessions;
+  const now = Date.now() / 1000;
   if (s.status === "ready" && (await urlUp(probeUrl(s.url, s.os)))) {
     s.status = "active";
-    s.checked_at = Date.now() / 1000;
-    await put(username, s);
-  } else if (healthCheckDue(s)) {
-    sessions[username] = applyHealth(s, await urlUp(probeUrl(s.url, s.os)));
-    await put(username, sessions[username]);
+    await store.putSession(username, s);
+    await store.putHealth(username, { checked_at: now });
   } else if (
     s.status === "pending" &&
-    Date.now() / 1000 - (s.dispatched_at || Date.now() / 1000) > PENDING_TIMEOUT_S
+    now - (s.dispatched_at || now) > PENDING_TIMEOUT_S
   ) {
     delete sessions[username];
-    await drop(username);
+    await store.dropSession(username);
+  } else if (s.status === "active") {
+    // Health is merged in for the page but written only to its own hash, so
+    // this never overwrites the session itself (see state.js getHealth).
+    let health = await store.getHealth(username);
+    if (healthCheckDue({ ...s, ...health }, now)) {
+      const { checked_at, unreachable_since } = applyHealth(health, await urlUp(probeUrl(s.url, s.os)), now);
+      health = unreachable_since ? { checked_at, unreachable_since } : { checked_at };
+      await store.putHealth(username, health);
+    }
+    sessions[username] = { ...s, ...health };
   }
   return sessions;
 }

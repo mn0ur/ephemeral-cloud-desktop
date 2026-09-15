@@ -17,7 +17,9 @@ export default async function handler(req, res) {
   return res.status(200).json({
     google_client_id: GOOGLE_CLIENT_ID,
     session,
-    sessions: await loadSessions(),
+    sessions: Object.fromEntries(
+      Object.entries(await loadSessions()).map(([u, { lost_token_hash: _h, ...s }]) => [u, s])
+    ),
     admins: await getAdmins(),
     permanent_users: await getPermanentUsers(),
     guest_limit_minutes: await getGuestLimitMinutes(),

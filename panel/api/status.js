@@ -1,6 +1,6 @@
 import { sessionFromRequest, GOOGLE_CLIENT_ID } from "../lib/auth.js";
 import {
-  loadSessions, putSession, dropSession, hasSavedData, stateConfigured, getNotice,
+  loadSessions, putSession, dropSession, hasSavedData, stateConfigured, getNotice, getHealth, putHealth,
 } from "../lib/state.js";
 import { runProgress, tokenConfigured } from "../lib/github.js";
 import {
@@ -27,7 +27,7 @@ export default async function handler(req, res) {
   let sessions = await loadSessions();
 
   if (session) {
-    sessions = await refreshOwn(sessions, session.user_id, putSession, dropSession);
+    sessions = await refreshOwn(sessions, session.user_id, { putSession, dropSession, getHealth, putHealth });
   }
 
   // Non-admins see only their own session. Never anyone else's email, URL or
@@ -69,7 +69,7 @@ export default async function handler(req, res) {
     // few seconds forever would burn rate limit for no reason.
     progress: worthProgress ? await runProgress(session.user_id, anchor, phase === "destroying" ? "DESTROY" : "START") : null,
     has_saved_data: session ? await hasSavedData(session.user_id) : false,
-    notice: session && !own ? await getNotice(session.user_id) : null,
+    notice: session && (!own || phase === "error") ? await getNotice(session.user_id) : null,
   };
 
   if (!tokenConfigured) {

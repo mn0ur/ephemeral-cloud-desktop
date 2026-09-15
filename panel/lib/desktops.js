@@ -57,17 +57,21 @@ export function canCancel(s, now = Date.now() / 1000) {
   return false;
 }
 
-// Workflow runs are named "Desktop - START · <username> · <os>" (run-name in
-// the workflows). The panel used to show the newest desktop run of ANY user,
-// so right after clicking Start a user saw someone else's finished run with
-// every step "done". Match the username as a whole " · "-separated token so
-// "mnuowr" never claims "mnuowr-2", and ignore runs from before this action.
-export function runBelongsTo(run, username, sinceTs) {
-  const name = String(run?.name || "");
-  const parts = name.split(" · ");
-  if (!parts[0].toUpperCase().startsWith("DESKTOP")) return false;
+// Workflow runs are titled "Desktop - START · <username> · <os>" (run-name in
+// the workflows; the API returns it as display_title - name is always the
+// bare workflow name). The panel used to show the newest desktop run of ANY
+// user, so right after clicking Start a user saw someone else's finished run
+// with every step "done". Match the username as a whole " · "-separated token
+// so "mnuowr" never claims "mnuowr-2", match the action (START vs DESTROY) so
+// a cancel never shows the start run, and ignore runs from before this action.
+// dispatched_at is written before the dispatch call, so 30 s covers clock skew.
+export function runBelongsTo(run, username, sinceTs, verb) {
+  const parts = String(run?.display_title || "").split(" · ");
+  const head = parts[0].toUpperCase();
+  if (!head.startsWith("DESKTOP")) return false;
+  if (verb && !head.endsWith(` ${verb}`)) return false;
   if (!parts.slice(1).includes(String(username))) return false;
-  if (sinceTs && Date.parse(run.created_at) / 1000 < Number(sinceTs) - 120) return false;
+  if (sinceTs && Date.parse(run.created_at) / 1000 < Number(sinceTs) - 30) return false;
   return true;
 }
 

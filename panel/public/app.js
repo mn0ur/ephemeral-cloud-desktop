@@ -163,7 +163,8 @@ function renderMine(s) {
   // as an existing machine - "Booting", a Destroy button, and "Password not
   // recorded - this desktop was recovered" - and a new user destroyed their
   // own start twice believing a machine was already running (2026-09-15).
-  const phase = mine.phase || "starting";
+  const phase = mine.phase || (mine.destroy_dispatched_at ? "destroying"
+    : mine.status === "active" ? "running" : mine.status === "ready" ? "booting" : "starting");
   lastPhase = phase;
   const isWin = mine.os === "windows";
   const osLabel = isWin ? "Windows" : "Linux";
@@ -276,7 +277,7 @@ async function go(action) {
     : "Destroy your desktop? Your files survive only if you chose to keep them.")) return;
   $("err").textContent = "";
   busy = true; pendingAction = action; actionStartedAt = Date.now() / 1000;
-  if (action === "start") startedByMe = true;
+  startedByMe = action === "start"; // a cancel must not auto-open the machine it cancels
   renderMine({ progress: null });
   try {
     const r = await fetch("/api/dispatch", {

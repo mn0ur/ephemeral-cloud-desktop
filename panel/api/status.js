@@ -62,7 +62,7 @@ export default async function handler(req, res) {
     // Two GitHub API calls - only when something is actually mid-flight. A
     // settled panel has nothing to report, and polling the Actions API every
     // few seconds forever would burn rate limit for no reason.
-    progress: worthProgress ? await runProgress(session.user_id, anchor) : null,
+    progress: worthProgress ? await runProgress(session.user_id, anchor, phase === "destroying" ? "DESTROY" : "START") : null,
     has_saved_data: session ? await hasSavedData(session.user_id) : false,
   };
 

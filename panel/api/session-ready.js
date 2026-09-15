@@ -42,6 +42,10 @@ export default async function handler(req, res) {
     os,
     region,
     ...(isGuest ? { expires_at: startedAt + (await getGuestLimitMinutes()) * 60 } : {}),
+    // Cancelled while starting: the destroy waits behind this run in the
+    // per-user concurrency group. Keep the mark so the page shows "Shutting
+    // down" instead of offering Open on a machine that is about to go.
+    ...(prior.destroy_dispatched_at ? { destroy_dispatched_at: prior.destroy_dispatched_at } : {}),
   });
   await logEvent("start", { username, email, url: req.body?.url, os, region });
   return res.status(200).json({ ok: true });

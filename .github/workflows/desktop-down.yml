@@ -118,8 +118,8 @@ jobs:
           # destroy for that user then fails "Error acquiring the state lock"
           # forever - guest arqqin was locked out for a day. This job holds the
           # per-user concurrency group, so no other start/destroy for this user
-          # can be running; a lock older than the longest job timeout (25 min)
-          # is orphaned. The reaper's own locks last seconds to minutes.
+          # can be running. The reaper is in its own group but its job times out
+          # at 30 min, so a lock older than an hour belongs to no live run.
           set -uo pipefail
           KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
           if [ "${{ inputs.region }}" != "ap-south-1" ]; then
@@ -127,9 +127,11 @@ jobs:
           fi
           BUCKET=ephemeral-desktop-643902831477-tfstate
           LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
-          CREATED=$(echo "$LOCK" | jq -r '.Created' | cut -d. -f1)
-          AGE=$(( $(date -u +%s) - $(date -u -d "${CREATED}Z" +%s) ))
-          if [ "$AGE" -gt 1800 ]; then
+          CREATED=$(echo "$LOCK" | jq -r '.Created // empty' 2>/dev/null || true)
+          # date -d "" means "today 00:00", which would read as old - reject it explicitly
+          CREATED_S=$([ -n "$CREATED" ] && date -u -d "$CREATED" +%s 2>/dev/null) || { echo "::warning::unparseable lock on $KEY - leaving it"; exit 0; }
+          AGE=$(( $(date -u +%s) - CREATED_S ))
+          if [ "$AGE" -gt 3600 ]; then
             aws s3 rm "s3://$BUCKET/$KEY.tflock" --region me-central-1
             echo "::warning::removed an orphaned Terraform lock (${AGE}s old) on $KEY"
           else

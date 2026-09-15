@@ -57,10 +57,10 @@ export async function dispatch(workflowFile, inputs) {
 // showing the newest desktop run of anyone made a new user's Start look like
 // an already-finished machine. 20, not 5: with several users active the
 // caller's run is not guaranteed to be among the newest five.
-export async function runProgress(username, sinceTs) {
+export async function runProgress(username, sinceTs, verb) {
   try {
     const runs = (await gh(`/repos/${REPO}/actions/runs?per_page=20`)).workflow_runs || [];
-    const run = runs.find((r) => runBelongsTo(r, username, sinceTs));
+    const run = runs.find((r) => runBelongsTo(r, username, sinceTs, verb));
     if (!run) return null;
     const jobs = (await gh(`/repos/${REPO}/actions/runs/${run.id}/jobs`)).jobs || [];
     const steps = [];
@@ -81,7 +81,7 @@ export async function runProgress(username, sinceTs) {
       }
     }
     return {
-      name: run.name,
+      name: run.display_title || run.name,
       status: run.status,
       conclusion: run.conclusion,
       url: run.html_url,

@@ -148,7 +148,11 @@ function renderMine(s) {
     // No region selector: only one region is offered (ap-south-1). The
     // server still records and enforces region; re-add a selector when a
     // second region actually works (see REGIONS in lib/desktops.js).
+    // e.g. "AWS took back your last desktop" (api/session-lost.js). Cleared
+    // server-side on the next Start.
+    const noticeBlock = s.notice ? `<div class="steps"><div class="sub">${esc(s.notice)}</div></div>` : "";
     box.innerHTML = `
+      ${noticeBlock}
       ${osSelect}
       ${persistLabel}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
@@ -191,12 +195,24 @@ function renderMine(s) {
     return;
   }
 
+  if (phase === "unreachable") {
+    box.innerHTML =
+      `<div class="status"><span class="dot down"></span> Not responding &middot; ${osLabel}</div>` +
+      '<div class="sub">Your desktop has stopped answering for a few minutes. AWS may have taken the machine back. ' +
+      'Destroy it to clean up &mdash; your saved files are kept &mdash; then start a new one.</div>' +
+      (mine.url ? `<a class="open" href="${esc(isWin ? mine.url : loginUrl(mine.url, session.user_id, mine.password))}" target="_blank" rel="noopener">Try opening it anyway &rarr;</a>` : "") +
+      '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
+    $("destroy").onclick = () => go("destroy");
+    return;
+  }
+
   // booting (machine exists, not answering yet) or running
   const running = phase === "running";
   let html = `<div class="status"><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Almost ready&hellip;"} &middot; ${osLabel}`;
   if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
-    const rate = isWin ? (s.hourly_usd_windows || 0.204) : (s.hourly_usd || 0.0529);
+    // Per session from the server: Windows and a Linux on-demand fallback cost more than Linux spot.
+    const rate = mine.hourly_usd ?? (isWin ? s.hourly_usd_windows : s.hourly_usd);
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
   }
   if (mine.expires_at) {

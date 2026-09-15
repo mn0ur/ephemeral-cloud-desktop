@@ -34,3 +34,8 @@ output "login_user" {
   description = "Account name the user signs in with. Linux: the panel username. Windows: the same, truncated to the 20-character local-account limit."
   value       = local.windows ? local.windows_user : var.web_user
 }
+
+output "market" {
+  description = "spot or on-demand - what this session actually runs on. The panel shows cost from it."
+  value       = local.spot ? "spot" : "on-demand"
+}

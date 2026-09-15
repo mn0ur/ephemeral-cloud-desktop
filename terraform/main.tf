@@ -174,9 +174,9 @@ resource "aws_vpc_security_group_ingress_rule" "https_cloudflare_only" {
   # 443 for both OSes: Linux and Windows both run Caddy on 443 (Windows'
   # DCV listens on 8443 on localhost only as far as the outside is concerned -
   # DCV refuses to bind 443 itself, "Invalid port 443, ignoring all endpoints").
-  from_port         = 443
-  to_port           = 443
-  ip_protocol       = "tcp"
+  from_port   = 443
+  to_port     = 443
+  ip_protocol = "tcp"
 }
 
 // No UDP rule. The Selkies engine streams over a single TCP connection, so the
@@ -358,6 +358,12 @@ resource "aws_instance" "desktop" {
     fresh                    = var.fresh ? "true" : "false"
     cloudflare_dns_api_token = var.cloudflare_dns_api_token
     access_enabled           = local.access_enabled ? "true" : "false"
+    # Spot reclaim watcher (see the script): only a spot machine can be taken
+    # back, and only a panel session has a token to report it with.
+    spot          = local.spot ? "true" : "false"
+    session_user  = var.username
+    session_token = local.spot ? var.session_token : ""
+    panel_url     = var.panel_url
     # A volume is attached for the owner's own desktop always, and for a guest
     # only when they asked to keep their data. The boot script needs to know
     # which, because "no volume found" is a fatal error in one case and the
@@ -377,6 +383,15 @@ resource "aws_instance" "desktop" {
     http_endpoint = "enabled"
   }
 
+  # A spot launch with no capacity is retried by the provider instead of
+  # failing, so the apply sat on "Still creating..." until the 25-minute job
+  # timeout killed it (guest arqqin, 2026-09-14) and left a stale state lock.
+  # A healthy create takes under a minute; fail after 5 so desktop-up.yml can
+  # retry on-demand while the user is still watching.
+  timeouts {
+    create = "5m"
+  }
+
   lifecycle {
     precondition {
       condition     = !local.windows || var.username != ""
@@ -384,9 +399,10 @@ resource "aws_instance" "desktop" {
     }
   }
 
-  # Spot when available. Set use_spot=false to fall back to on-demand.
+  # Spot when available (Linux only - see local.spot). Set use_spot=false to
+  # fall back to on-demand.
   dynamic "instance_market_options" {
-    for_each = var.use_spot ? [1] : []
+    for_each = local.spot ? [1] : []
 
     content {
       market_type = "spot"

@@ -44,6 +44,8 @@ const K = {
   admins: "admins",             // set: emails with full admin access
   permanentUsers: "permanent_users", // set: emails allowed to persist data
   config: "config",             // hash: guest_limit_minutes, etc.
+  notices: "notices",           // hash: username -> one message for their next visit
+  health: "health",             // hash: username -> {checked_at, unreachable_since}
 };
 
 // -- sessions ---------------------------------------------------------------
@@ -63,6 +65,33 @@ export async function putSession(username, session) {
 
 export async function dropSession(username) {
   await requireRedis().hdel(K.sessions, username);
+  await requireRedis().hdel(K.health, username);
+}
+
+// Health probe results live apart from the session on purpose. The probe
+// waits up to 2.5 s - longest exactly when a machine is gone - and writing
+// the whole session back afterwards erased a Destroy made meanwhile, or
+// resurrected a session that had just ended (review of PR #32).
+export async function getHealth(username) {
+  const v = await requireRedis().hget(K.health, username);
+  return (typeof v === "string" ? JSON.parse(v) : v) || {};
+}
+
+export async function putHealth(username, h) {
+  await requireRedis().hset(K.health, { [username]: JSON.stringify(h) });
+}
+
+export async function clearHealth(username) {
+  await requireRedis().hdel(K.health, username);
+}
+
+// One-shot claim, so concurrent or retried calls act once (SET NX EX).
+export async function claimOnce(key, ttlSeconds) {
+  return (await requireRedis().set(key, "1", { nx: true, ex: ttlSeconds })) === "OK";
+}
+
+export async function releaseClaim(key) {
+  await requireRedis().del(key);
 }
 
 // -- users ------------------------------------------------------------------
@@ -209,4 +238,21 @@ export async function setGuestLimitMinutes(n) {
   await requireRedis().hset(K.config, { guest_limit_minutes: String(minutes) });
   await logEvent("guest_limit_changed", { minutes });
   return minutes;
+}
+
+// -- notices ---------------------------------------------------------------
+
+// One message waiting for a user's next look at the panel - e.g. that AWS
+// reclaimed their machine while they were away. Cleared when they start again
+// rather than on first read, because the page polls and would lose it at once.
+export async function setNotice(username, text) {
+  await requireRedis().hset(K.notices, { [username]: String(text) });
+}
+
+export async function getNotice(username) {
+  return (await requireRedis().hget(K.notices, username)) || null;
+}
+
+export async function clearNotice(username) {
+  await requireRedis().hdel(K.notices, username);
 }

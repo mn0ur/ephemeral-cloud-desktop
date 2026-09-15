@@ -1,6 +1,6 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
-import { loadSessions, putSession, logEvent, getGuestLimitMinutes } from "../lib/state.js";
-import { REGIONS } from "../lib/desktops.js";
+import { loadSessions, putSession, logEvent, getGuestLimitMinutes, clearHealth } from "../lib/state.js";
+import { REGIONS, hashToken } from "../lib/desktops.js";
 
 // Called by desktop-up.yml once terraform apply succeeds. This deployment holds
 // no AWS or Terraform credentials by design, so it cannot read `terraform
@@ -41,12 +41,20 @@ export default async function handler(req, res) {
     is_guest: isGuest,
     os,
     region,
+    // What was actually launched: Linux falls back to on-demand when spot has
+    // no capacity, Windows is always on-demand. Drives the cost shown.
+    market: os === "windows" || req.body?.market === "on-demand" ? "on-demand" : "spot",
+    instance_id: req.body?.instance_id || null,
+    // Lets this machine report its own spot reclaim (api/session-lost.js).
+    // Hashed: the raw token only ever exists on the machine.
+    ...(req.body?.session_token ? { lost_token_hash: hashToken(req.body.session_token) } : {}),
     ...(isGuest ? { expires_at: startedAt + (await getGuestLimitMinutes()) * 60 } : {}),
     // Cancelled while starting: the destroy waits behind this run in the
     // per-user concurrency group. Keep the mark so the page shows "Shutting
     // down" instead of offering Open on a machine that is about to go.
     ...(prior.destroy_dispatched_at ? { destroy_dispatched_at: prior.destroy_dispatched_at } : {}),
   });
+  await clearHealth(username);
   await logEvent("start", { username, email, url: req.body?.url, os, region });
   return res.status(200).json({ ok: true });
 }

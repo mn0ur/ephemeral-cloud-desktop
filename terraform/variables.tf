@@ -450,3 +450,21 @@ variable "windows_ssm_instance_profile" {
   type        = string
   default     = "desktop-ssm-diagnostics"
 }
+
+variable "session_token" {
+  description = <<-EOT
+    Per-session random token, generated inside desktop-up.yml (never a
+    workflow_dispatch input - this repo is public). The machine uses it to
+    tell the panel AWS is reclaiming it (panel/api/session-lost.js); the
+    panel stores only its hash. Empty disables the reclaim watcher.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "panel_url" {
+  description = "Control panel the reclaim watcher reports to."
+  type        = string
+  default     = "https://desktop.sihaab.com"
+}

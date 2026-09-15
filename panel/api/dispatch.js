@@ -44,9 +44,8 @@ export default async function handler(req, res) {
     // client only shows the checkbox when can_persist is true, but the
     // server is the actual enforcement point.
     const persist = session.can_persist && Boolean(req.body?.persist);
-    // Windows is admin-only for now. Same shape as persist: the selector is
-    // only rendered for admins, and this line is what actually enforces it.
-    const os = requestedOs(session.is_admin, req.body?.os);
+    // Every tier chooses Linux or Windows at Start (see requestedOs).
+    const os = requestedOs(req.body?.os);
     // Same shape as os: admin-only, and this line is the actual enforcement -
     // the selector on the client is only a hint.
     const region = requestedRegion(session.is_admin, req.body?.region);

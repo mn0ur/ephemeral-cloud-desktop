@@ -44,6 +44,8 @@ let autoOpenBlocked = false;
 // reaches "active" (auto-open fires) or disappears. Kept separate from `busy`
 // so clearing busy early (see poll()) doesn't also skip the one auto-open.
 let startedByMe = false;
+// The phase last drawn, so Destroy/Cancel can confirm with the right words.
+let lastPhase = null;
 
 
 // Measured, not guessed (2026-09-12/13, ap-south-1): Windows Start->ready
@@ -114,10 +116,10 @@ function renderMine(s) {
   // ignored - and a destroy gets clicked repeatedly.
   if (busy) {
     box.innerHTML =
-      `<div><span class="dot work"></span> ${pendingAction === "destroy" ? "Destroying&hellip;" : "Starting&hellip;"}</div>` +
+      `<div class="status"><span class="dot work"></span> ${pendingAction === "destroy" ? "Shutting down your desktop&hellip;" : "Starting your desktop&hellip;"}</div>` +
       `<div class="sub">${pendingAction === "destroy"
         ? "Terminating the instance. Your files are kept if you chose to keep them."
-        : "This takes a few minutes."}</div>` +
+        : "We're creating a fresh machine for you."}</div>` +
       barHtml(pendingAction === "destroy" ? "destroy" : ($("os")?.value || s.my_session?.os || "linux"),
         (pendingAction === "destroy" ? s.my_session?.destroy_dispatched_at : s.my_session?.dispatched_at) || actionStartedAt) +
       stepsHtml(s.progress);
@@ -126,7 +128,8 @@ function renderMine(s) {
   }
 
   const mine = s.my_session;
-  if (!mine || mine.status === "error") {
+  if (!mine || mine.phase === "error" || mine.status === "error") {
+    lastPhase = null;
     // Delete-saved-data appears only when there is some and nothing is running.
     // Deliberately not beside Destroy: destroy ends a session and KEEPS your
     // files, this throws them away. Side by side is how someone deletes their
@@ -139,11 +142,9 @@ function renderMine(s) {
     const persistLabel = session.can_persist
       ? `<label><input type="checkbox" id="persist"> Keep my files after destroy</label>`
       : "";
-    // Admin-only for now (server-enforced in /api/dispatch). Everyone else
-    // sees this card exactly as before: no hint that a second OS exists.
-    const osSelect = session.is_admin
-      ? `<label>Operating system <select id="os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>`
-      : "";
+    // Every tier picks the OS for the machine it is about to create. Nothing
+    // is running until this Start button is pressed.
+    const osSelect = `<label>Operating system <select id="os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>`;
     // No region selector: only one region is offered (ap-south-1). The
     // server still records and enforces region; re-add a selector when a
     // second region actually works (see REGIONS in lib/desktops.js).
@@ -157,15 +158,43 @@ function renderMine(s) {
     return;
   }
 
-  const running = mine.status === "active";
+  // Render from the server's phase (lib/desktops.js sessionPhase), never from
+  // raw fields. A start that has not produced a machine yet used to be drawn
+  // as an existing machine - "Booting", a Destroy button, and "Password not
+  // recorded - this desktop was recovered" - and a new user destroyed their
+  // own start twice believing a machine was already running (2026-09-15).
+  const phase = mine.phase || (mine.destroy_dispatched_at ? "destroying"
+    : mine.status === "active" ? "running" : mine.status === "ready" ? "booting" : "starting");
+  lastPhase = phase;
   const isWin = mine.os === "windows";
-  // A destroy in flight (server-side anchor, so it survives a reload): the
-  // desktop is still technically up, but showing "Running" plus Open/Destroy
-  // buttons invites a second click on a machine that is already going away.
-  const destroying = Boolean(mine.destroy_dispatched_at);
-  const label = destroying ? "Destroying&hellip;" : running ? "Running" : "Booting&hellip;";
-  let html = `<div><span class="dot ${running && !destroying ? "up" : "work"}"></span> ${label}${isWin ? " &middot; Windows" : ""}`;
-  if (running && !destroying && mine.started_at) {
+  const osLabel = isWin ? "Windows" : "Linux";
+
+  if (phase === "starting") {
+    let html = `<div class="status"><span class="dot work"></span> Starting your ${osLabel} desktop&hellip;</div>` +
+      '<div class="sub">We\'re creating a fresh machine for you. Your sign-in details appear here as soon as it\'s ready.</div>' +
+      barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
+    // No Cancel for the first minute (server decides: mine.can_cancel).
+    if (mine.can_cancel) html += '<div class="row"><button id="destroy" class="stop">Cancel</button></div>';
+    html += stepsHtml(s.progress);
+    box.innerHTML = html;
+    tickBars();
+    if ($("destroy")) $("destroy").onclick = () => go("destroy");
+    return;
+  }
+
+  if (phase === "destroying") {
+    box.innerHTML =
+      `<div class="status"><span class="dot work"></span> Shutting down your ${osLabel} desktop&hellip;</div>` +
+      '<div class="sub">Your files are kept if you chose to keep them.</div>' +
+      barHtml("destroy", mine.destroy_dispatched_at) + stepsHtml(s.progress);
+    tickBars();
+    return;
+  }
+
+  // booting (machine exists, not answering yet) or running
+  const running = phase === "running";
+  let html = `<div class="status"><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Almost ready&hellip;"} &middot; ${osLabel}`;
+  if (running && mine.started_at) {
     const secs = Date.now() / 1000 - mine.started_at;
     const rate = isWin ? (s.hourly_usd_windows || 0.204) : (s.hourly_usd || 0.0529);
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
@@ -175,11 +204,7 @@ function renderMine(s) {
     html += ` <span class="sub">&middot; ${left > 0 ? fmtDur(left) + " left" : "ending&hellip;"}</span>`;
   }
   html += "</div>";
-  if (mine.destroy_dispatched_at) {
-    html += barHtml("destroy", mine.destroy_dispatched_at);
-  } else if (!running) {
-    html += barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
-  }
+  if (!running) html += barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
 
   // Linux: Basic-Auth credentials ride in the URL (see loginUrl) so the link
   // logs straight in. Windows: DCV has its own sign-in page and ignores URL
@@ -197,14 +222,16 @@ function renderMine(s) {
     </div>`;
 
   if (running && autoOpenBlocked) {
-    html += `<div class="steps" style="border-color:var(--green-dim)">
+    html += `<div class="steps">
         <div><span class="dot up"></span> <strong>Your desktop is ready.</strong></div>
         <div class="sub">The browser blocked the tab we tried to open for you &mdash; use the button below.</div>
       </div>`;
   }
-  if (mine.url && !destroying) html += `<a class="open" href="${esc(openUrl)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
-  if (!destroying) html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
-  if (!running || destroying) html += stepsHtml(s.progress);
+  // Open only once it actually answers - opening while it boots lands on an
+  // error page and reads as broken.
+  if (running && mine.url) html += `<a class="open" href="${esc(openUrl)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
+  html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
+  if (!running) html += stepsHtml(s.progress);
   box.innerHTML = html;
   tickBars();
   if ($("destroy")) $("destroy").onclick = () => go("destroy");
@@ -245,10 +272,12 @@ async function go(action) {
     body.persist = $("persist")?.checked || false;
     body.os = $("os")?.value || "linux";
   }
-  if (action === "destroy" && !confirm("Destroy your desktop? Your files survive only if you chose to keep them.")) return;
+  if (action === "destroy" && !confirm(lastPhase === "starting"
+    ? "Cancel starting your desktop? The machine being created will be removed."
+    : "Destroy your desktop? Your files survive only if you chose to keep them.")) return;
   $("err").textContent = "";
   busy = true; pendingAction = action; actionStartedAt = Date.now() / 1000;
-  if (action === "start") startedByMe = true;
+  startedByMe = action === "start"; // a cancel must not auto-open the machine it cancels
   renderMine({ progress: null });
   try {
     const r = await fetch("/api/dispatch", {

@@ -22,11 +22,57 @@ export function hourlyRate(os) {
   return os === "windows" ? HOURLY_USD_WINDOWS : HOURLY_USD;
 }
 
-// The server-side policy for who may start Windows. The client only shows
-// the selector to admins, but - as with persist - this is the enforcement
-// point: anyone else asking for windows silently gets linux.
-export function requestedOs(isAdmin, bodyOs) {
-  return isAdmin === true && bodyOs === "windows" ? "windows" : "linux";
+// Every tier chooses its OS at Start (owner decision 2026-09-15: guests,
+// permanent users and admins alike). Guests stay cost-capped by the reaper's
+// time limit. Exact match only - anything that is not the string "windows"
+// is linux, so a malformed body can never select something unexpected.
+export function requestedOs(bodyOs) {
+  return bodyOs === "windows" ? "windows" : "linux";
+}
+
+// What the user's session IS, from their point of view. Derived on the server
+// so the page never has to guess from raw fields - it guessed wrong: a
+// just-dispatched start (status "pending", no password yet) was drawn as an
+// existing machine with "Password not recorded - this desktop was recovered",
+// and a new user destroyed their own start twice believing a machine had
+// already been running before they arrived (2026-09-15).
+export function sessionPhase(s) {
+  if (!s) return null;
+  if (s.destroy_dispatched_at) return "destroying";
+  if (s.status === "error") return "error";
+  if (s.status === "active") return "running";
+  if (s.status === "ready") return "booting";
+  return "starting";
+}
+
+// The first minute of a start offers no Cancel: a destroy dispatched then
+// only queues behind the apply anyway, and an immediate Cancel is almost
+// always a misread of the screen, not an intent.
+export const CANCEL_AFTER_S = 60;
+
+export function canCancel(s, now = Date.now() / 1000) {
+  const phase = sessionPhase(s);
+  if (phase === "booting" || phase === "running") return true;
+  if (phase === "starting") return now - (Number(s.dispatched_at) || 0) >= CANCEL_AFTER_S;
+  return false;
+}
+
+// Workflow runs are titled "Desktop - START · <username> · <os>" (run-name in
+// the workflows; the API returns it as display_title - name is always the
+// bare workflow name). The panel used to show the newest desktop run of ANY
+// user, so right after clicking Start a user saw someone else's finished run
+// with every step "done". Match the username as a whole " · "-separated token
+// so "mnuowr" never claims "mnuowr-2", match the action (START vs DESTROY) so
+// a cancel never shows the start run, and ignore runs from before this action.
+// dispatched_at is written before the dispatch call, so 30 s covers clock skew.
+export function runBelongsTo(run, username, sinceTs, verb) {
+  const parts = String(run?.display_title || "").split(" · ");
+  const head = parts[0].toUpperCase();
+  if (!head.startsWith("DESKTOP")) return false;
+  if (verb && !head.endsWith(` ${verb}`)) return false;
+  if (!parts.slice(1).includes(String(username))) return false;
+  if (sinceTs && Date.parse(run.created_at) / 1000 < Number(sinceTs) - 30) return false;
+  return true;
 }
 
 // Mumbai stays the default so every running session (and the state key that

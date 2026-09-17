@@ -220,10 +220,6 @@ function renderMine(s) {
     const rate = mine.hourly_usd ?? (isWin ? s.hourly_usd_windows : s.hourly_usd);
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
   }
-  if (mine.expires_at) {
-    const left = mine.expires_at - Date.now() / 1000;
-    html += ` <span class="sub">&middot; ${left > 0 ? fmtDur(left) + " left" : "ending&hellip;"}</span>`;
-  }
   html += "</div>";
   if (!running) html += barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
 

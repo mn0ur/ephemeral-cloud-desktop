@@ -44,7 +44,7 @@ on:
         required: false
         default: ""
       persist:
-        description: "Guest chose to keep their data after destroy."
+        description: "Keep the user's data after destroy. Guests were removed 2026-09-17; every caller now is a permanent user, so the panel always sends true."
         type: boolean
         default: false
       enable_access:
@@ -73,7 +73,7 @@ on:
         required: false
         default: "c7i.xlarge"
       region:
-        description: "AWS region. ap-south-1 (Mumbai) is the only one offered: me-central-1 (UAE) throttles every launch for this account. Only ap-south-1 is offered; this input is now a fixed single choice, not an access gate. The state key no longer varies by region (see the terraform apply step)."
+        description: "AWS region. Only ap-south-1 (Mumbai) is offered: me-central-1 (UAE) throttles every launch for this account. This input is now a fixed single choice, not an access gate. The state key no longer varies by region (see the terraform apply step)."
         type: choice
         options: [ap-south-1]
         default: ap-south-1

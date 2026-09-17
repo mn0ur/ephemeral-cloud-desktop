@@ -424,7 +424,7 @@ variable "cloudflare_account_id" {
 }
 
 variable "is_guest" {
-  description = "True only for an actual guest session - controls the Role=guest-desktop tag the reaper selects on. False for permanent users, other admins, and the owner's own desktop, even though they may also have a non-empty username."
+  description = "Legacy: guests were removed 2026-09-17. Only controls the Role=guest-desktop tag, which the reaper no longer selects on (it now finds desktops via tag:Stack=desktop). False for permanent users, other admins, and the owner's own desktop, even though they may also have a non-empty username."
   type        = bool
   default     = false
 }

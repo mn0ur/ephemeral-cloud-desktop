@@ -9,7 +9,7 @@ on:
       region:
         description: "Region to bake into. AMIs are region-specific, so a region move needs its own bake - this input is what lets the new region be prepared while the old one keeps serving."
         type: string
-        default: "me-central-1"
+        default: "ap-south-1"
       gpu:
         description: "Bake the GPU variant: NVIDIA driver + container toolkit + DRM kernel args, built ON a g4dn so the driver is verified against a real T4. Produces Variant=gpu; leave false for the CPU AMI."
         type: boolean

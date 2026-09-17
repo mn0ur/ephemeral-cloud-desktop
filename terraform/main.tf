@@ -415,10 +415,11 @@ resource "aws_instance" "desktop" {
   }
 
   # Owner/Role/OwnerEmail only exist on guest instances - the owner's own
-  # desktop keeps exactly the tag set it always had. Role=guest-desktop is
-  # how desktop-reaper.yml finds every live guest desktop to check for
-  # idleness - there is no fixed list of slots any more to loop over, so
-  # discovery has to be by tag, not by a hardcoded set of names.
+  # desktop keeps exactly the tag set it always had. Role is legacy (guests
+  # were removed 2026-09-17); desktop-reaper.yml now finds every live
+  # desktop by tag:Stack=desktop - there is no fixed list of slots any more
+  # to loop over, so discovery has to be by tag, not by a hardcoded set of
+  # names.
   tags = merge(
     { Name = local.display },
     var.username != "" ? {

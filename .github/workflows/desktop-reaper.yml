@@ -49,13 +49,51 @@ jobs:
           # enforce and this workflow destroys nothing. It stays as a cheap
           # visibility pass until Plan C gives it the job of parking machines
           # that are running with nobody connected.
+          #
+          # Read-only: describe-instances only, never a mutating AWS call.
+          # The run shell is `bash -eo pipefail`, so every step below is
+          # written to still exit 0 on an empty result set, an unparseable
+          # LaunchTime, or an owner tag of `None`.
           set -uo pipefail
           ROWS=$(aws ec2 describe-instances --region ap-south-1 \
             --filters "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=running,pending" \
             --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`Owner`]|[0].Value,LaunchTime]' \
-            --output text)
+            --output text || true)
+
+          {
+            echo "### Running desktops"
+            echo ""
+            echo "| Owner | Instance | Age |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
           if [ -z "$ROWS" ]; then
             echo "no desktops running"
-          else
-            echo "$ROWS"
+            echo "_no desktops running_" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+
+          NOW=$(date -u +%s)
+          while IFS=$'\t' read -r INSTANCE_ID OWNER LAUNCH_TIME; do
+            [ -z "$INSTANCE_ID" ] && continue
+            OWNER_DISPLAY="$OWNER"
+            if [ -z "$OWNER_DISPLAY" ] || [ "$OWNER_DISPLAY" = "None" ]; then
+              OWNER_DISPLAY="unknown"
+            fi
+
+            LAUNCH_EPOCH=$(date -u -d "$LAUNCH_TIME" +%s 2>/dev/null || true)
+            if [ -z "$LAUNCH_EPOCH" ]; then
+              echo "$OWNER_DISPLAY $INSTANCE_ID age unknown (unparseable LaunchTime: $LAUNCH_TIME)"
+              echo "| $OWNER_DISPLAY | $INSTANCE_ID | unknown |" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            AGE_H=$(( (NOW - LAUNCH_EPOCH) / 3600 ))
+            echo "$OWNER_DISPLAY $INSTANCE_ID ${AGE_H}h"
+            echo "| $OWNER_DISPLAY | $INSTANCE_ID | ${AGE_H}h |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$AGE_H" -gt 8 ]; then
+              echo "::warning::$OWNER_DISPLAY has been running for ${AGE_H}h"
+            fi
+          done <<< "$ROWS"
+
+          exit 0

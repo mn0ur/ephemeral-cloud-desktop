@@ -41,8 +41,6 @@ export default async function handler(req, res) {
       return res.status(503).json({ error: "all desktops are busy right now - try again shortly" });
     }
 
-    // Everyone who can start is a permanent user: files are always kept.
-    const persist = true;
     // Every tier chooses Linux or Windows at Start (see requestedOs).
     const os = requestedOs(req.body?.os);
     // Same shape as os: server is the actual enforcement point, the selector
@@ -55,7 +53,7 @@ export default async function handler(req, res) {
       os,
       region,
     });
-    await logEvent("login_start", { username: me, email: session.email, persist, os, region });
+    await logEvent("login_start", { username: me, email: session.email, persist: true, os, region });
 
     try {
       await dispatch(workflow, {
@@ -63,7 +61,8 @@ export default async function handler(req, res) {
         fresh: "false",
         guest_username: me,
         owner_email: session.email,
-        persist: persist ? "true" : "false",
+        // Everyone who can start is a permanent user: files are always kept.
+        persist: "true",
         is_guest: "false",
         os,
         region,
@@ -79,7 +78,7 @@ export default async function handler(req, res) {
 
     // Only after a successful dispatch: claiming data exists when the start
     // never ran would show a delete button for nothing.
-    if (persist) await setHasData(me, true);
+    await setHasData(me, true);
     await clearNotice(me);
     return res.status(202).json({ ok: true });
   }

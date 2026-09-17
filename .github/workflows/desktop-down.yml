@@ -78,7 +78,6 @@ jobs:
       - name: Map region to its AZ suffix
         run: |
           echo "AZ_SUFFIX=c" >> "$GITHUB_ENV"
-          echo "AWS_AZ=ap-south-1c" >> "$GITHUB_ENV"
 
       - name: Prepare provider cache dir
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"

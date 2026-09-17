@@ -31,10 +31,11 @@ export function hourlyRate(os, market) {
   return market === "on-demand" ? HOURLY_USD_ONDEMAND : HOURLY_USD;
 }
 
-// Every tier chooses its OS at Start (owner decision 2026-09-15: guests,
-// permanent users and admins alike). Guests stay cost-capped by the reaper's
-// time limit. Exact match only - anything that is not the string "windows"
-// is linux, so a malformed body can never select something unexpected.
+// Every tier chooses its OS at Start (owner decision 2026-09-15). Only an
+// admin or a permanent user can start at all - see startRefusalReason.
+// Nothing caps how long a session runs; auto-sleep is a later plan. Exact
+// match only - anything that is not the string "windows" is linux, so a
+// malformed body can never select something unexpected.
 export function requestedOs(bodyOs) {
   return bodyOs === "windows" ? "windows" : "linux";
 }
@@ -135,9 +136,7 @@ export function runBelongsTo(run, username, sinceTs, verb) {
 }
 
 // Mumbai stays the default so every running session (and the state key that
-// tracks it, see dispatch.js) keeps working unchanged. UAE AMIs are being
-// baked in parallel - az matches terraform/variables.tf's az_suffix default
-// per region.
+// tracks it, see dispatch.js) keeps working unchanged.
 export const REGIONS = {
   "ap-south-1": { az: "c", label: "India (Mumbai)" },
   // me-central-1 (UAE) was here 2026-09-12/13 and is removed: AWS throttles

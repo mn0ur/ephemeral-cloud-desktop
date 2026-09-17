@@ -223,6 +223,10 @@ export async function urlUp(probe, timeoutMs = 2500) {
 export function sessionExpired(s, now = Date.now() / 1000) {
   if (!s) return false;
   if (s.destroy_dispatched_at) return now - s.destroy_dispatched_at > PENDING_TIMEOUT_S;
+  // Same rule, same reason: sessionPhase() draws "sleeping" from this field
+  // alone, so a sleep whose callback never arrived would otherwise hold the
+  // page on "Putting to sleep" with no Start button, forever.
+  if (s.sleep_dispatched_at) return now - s.sleep_dispatched_at > PENDING_TIMEOUT_S;
   if (s.status === "building") return now - (s.dispatched_at || now) > BUILD_STALE_S;
   if (["pending", "waking"].includes(s.status)) return now - (s.dispatched_at || now) > PENDING_TIMEOUT_S;
   return false;

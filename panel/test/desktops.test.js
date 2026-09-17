@@ -227,3 +227,12 @@ test("Fix round 3 (NB-2): a building session gets the same 20 minutes the machin
   assert.equal(sessionExpired({ status: "ready", dispatched_at: now - 86400 }, now), false);
   assert.equal(sessionExpired(null, now), false);
 });
+
+test("sessionExpired: a sleep whose callback never arrived is swept, like a destroy", () => {
+  const t0 = 1_800_000_000;
+  const sleeping = { status: "active", sleep_dispatched_at: t0 };
+  assert.equal(sessionExpired(sleeping, t0 + PENDING_TIMEOUT_S - 1), false);
+  assert.equal(sessionExpired(sleeping, t0 + PENDING_TIMEOUT_S + 1), true);
+  // a running session with no sleep in flight is never swept by age
+  assert.equal(sessionExpired({ status: "active" }, t0 + 99999), false);
+});

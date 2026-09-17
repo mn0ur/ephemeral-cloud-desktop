@@ -154,8 +154,10 @@ test("startRefusalReason: only accounts with access may start, and only one desk
   );
   // an admin always has access
   assert.equal(startRefusalReason({ has_access: true, is_admin: true }, null), null);
-  // already running or starting: one desktop per person
-  for (const status of ["pending", "ready", "active"]) {
+  // already running or starting: one desktop per person - including the two
+  // statuses Task 5 split "pending" into, so a second Start during a build
+  // or a wake is refused too, not just during the old single "pending".
+  for (const status of ["pending", "building", "waking", "ready", "active"]) {
     assert.equal(startRefusalReason(ok, { status }), "you already have a desktop running");
   }
   // a finished/errored session is not in the way

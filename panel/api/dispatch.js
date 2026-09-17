@@ -1,14 +1,13 @@
 import { sessionFromRequest } from "../lib/auth.js";
 import {
   loadSessions, putSession, dropSession, setHasData, hasSavedData, logEvent, clearNotice,
-  loadMachines, putMachine,
+  loadMachines, putMachine, claimOnce, releaseClaim,
 } from "../lib/state.js";
 import { dispatch, WORKFLOWS, tokenConfigured } from "../lib/github.js";
 import {
   activeCount, MAX_CONCURRENT, requestedOs, requestedRegion, startRefusalReason, NO_ACCESS_MESSAGE,
-  LIVE_STATUSES,
 } from "../lib/desktops.js";
-import { startPlan, machineKey, MACHINE_OSES } from "../lib/machines.js";
+import { startPlan, machineKey, wipeRefusalReason } from "../lib/machines.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
@@ -30,7 +29,6 @@ export default async function handler(req, res) {
   const me = session.user_id;
 
   const sessions = await loadSessions();
-  const live = LIVE_STATUSES;
 
   if (action === "start") {
     // Fail BEFORE recording anything. Marking a session pending and only then
@@ -57,82 +55,108 @@ export default async function handler(req, res) {
     // on the client is only a hint. One region only - see requestedRegion.
     const region = requestedRegion(req.body?.region);
 
-    const machines = await loadMachines();
-    const plan = startPlan(machines, me, os);
-
-    // Only one machine per user runs at a time. Sleep the other one first and
-    // remember what to wake when it reports back (api/session-slept dispatches
-    // the wake), so the two workflows never have to coordinate with each other.
-    if (plan.sleepOs) {
-      try {
-        await dispatch(WORKFLOWS.sleep, { guest_username: me, os: plan.sleepOs });
-      } catch (e) {
-        // Nothing was written yet - the session for `me` still does not
-        // exist, so there is nothing to roll back.
-        return res.status(e.status || 500).json({ error: e.message });
-      }
-      await putSession(me, {
-        status: "waking", email: session.email, dispatched_at: Date.now() / 1000,
-        os, region, pending_wake: true,
-      });
-      return res.status(202).json({ ok: true, waiting_for: plan.sleepOs });
+    // Read-plan-dispatch is NOT atomic on its own: loadMachines, startPlan
+    // and the dispatch below all happen across separate round trips, so two
+    // Starts within the same window (a double-click, two tabs, one tab per
+    // OS) can both read the same stale machine state, both pass every check
+    // above, and both dispatch a real workflow - two billable EC2 machines
+    // with only one session hash between them, the loser silently clobbered.
+    // A short per-user claim closes that window: it only needs to outlive
+    // this handler's own work (well under a minute), not the minutes-long
+    // build or the 40-60s wake that follow it - those are already guarded
+    // once the session status itself becomes "building"/"waking" (see
+    // LIVE_STATUSES in lib/desktops.js and startRefusalReason above, which
+    // reject every subsequent request while that status holds).
+    const startClaim = `start:${me}`;
+    if (!(await claimOnce(startClaim, 90))) {
+      return res.status(409).json({ error: "a start is already in progress for your account" });
     }
-
-    if (plan.action === "wake") {
-      await putSession(me, {
-        status: "waking", email: session.email, dispatched_at: Date.now() / 1000, os, region,
-      });
-      try {
-        await dispatch(WORKFLOWS.wake, { guest_username: me, os });
-      } catch (e) {
-        await dropSession(me);
-        return res.status(e.status || 500).json({ error: e.message });
-      }
-      return res.status(202).json({ ok: true, action: "wake" });
-    }
-
-    if (plan.action === "adopt") {
-      // Already building or running - the page just needs to keep polling.
-      return res.status(202).json({ ok: true, action: "adopt" });
-    }
-
-    // plan.action === "build": no machine record exists yet.
-    await putSession(me, {
-      status: "building",
-      email: session.email,
-      dispatched_at: Date.now() / 1000,
-      os,
-      region,
-    });
-    await logEvent("login_start", { username: me, email: session.email, persist: true, os, region });
 
     try {
-      await dispatch(workflow, {
-        username: me,
-        fresh: "false",
-        guest_username: me,
-        owner_email: session.email,
-        // Everyone who can start is a permanent user: files are always kept.
-        persist: "true",
-        is_guest: "false",
+      const machines = await loadMachines();
+      const plan = startPlan(machines, me, os);
+
+      // Only one machine per user runs at a time. Sleep the other one first
+      // and remember what to wake when it reports back (api/session-slept
+      // dispatches the wake), so the two workflows never have to coordinate
+      // with each other.
+      if (plan.sleepOs) {
+        try {
+          await dispatch(WORKFLOWS.sleep, { guest_username: me, os: plan.sleepOs });
+        } catch (e) {
+          // Nothing was written yet - the session for `me` still does not
+          // exist, so there is nothing to roll back.
+          return res.status(e.status || 500).json({ error: e.message });
+        }
+        await putSession(me, {
+          status: "waking", email: session.email, dispatched_at: Date.now() / 1000,
+          os, region, pending_wake: true,
+        });
+        return res.status(202).json({ ok: true, waiting_for: plan.sleepOs });
+      }
+
+      if (plan.action === "wake") {
+        await putSession(me, {
+          status: "waking", email: session.email, dispatched_at: Date.now() / 1000, os, region,
+        });
+        try {
+          await dispatch(WORKFLOWS.wake, { guest_username: me, os });
+        } catch (e) {
+          await dropSession(me);
+          return res.status(e.status || 500).json({ error: e.message });
+        }
+        return res.status(202).json({ ok: true, action: "wake" });
+      }
+
+      if (plan.action === "adopt") {
+        // Already building or running - the page just needs to keep polling.
+        return res.status(202).json({ ok: true, action: "adopt" });
+      }
+
+      // plan.action === "build": no machine record exists yet.
+      await putSession(me, {
+        status: "building",
+        email: session.email,
+        dispatched_at: Date.now() / 1000,
         os,
         region,
-        use_spot: "false",
       });
-    } catch (e) {
-      // Roll back on ANY dispatch failure - a GitHub outage, a revoked token or
-      // a rate limit would otherwise wedge the session in "pending" and hold one
-      // of MAX_CONCURRENT until it aged out.
-      await dropSession(me);
-      await logEvent("start_failed", { username: me, email: session.email });
-      return res.status(e.status || 500).json({ error: e.message });
-    }
+      await logEvent("login_start", { username: me, email: session.email, persist: true, os, region });
 
-    // Only after a successful dispatch: claiming data exists when the start
-    // never ran would show a delete button for nothing.
-    await setHasData(me, true);
-    await clearNotice(me);
-    return res.status(202).json({ ok: true });
+      try {
+        await dispatch(workflow, {
+          username: me,
+          fresh: "false",
+          guest_username: me,
+          owner_email: session.email,
+          // Everyone who can start is a permanent user: files are always kept.
+          persist: "true",
+          is_guest: "false",
+          os,
+          region,
+          use_spot: "false",
+        });
+      } catch (e) {
+        // Roll back on ANY dispatch failure - a GitHub outage, a revoked token or
+        // a rate limit would otherwise wedge the session in "pending" and hold one
+        // of MAX_CONCURRENT until it aged out.
+        await dropSession(me);
+        await logEvent("start_failed", { username: me, email: session.email });
+        return res.status(e.status || 500).json({ error: e.message });
+      }
+
+      // Only after a successful dispatch: claiming data exists when the start
+      // never ran would show a delete button for nothing.
+      await setHasData(me, true);
+      await clearNotice(me);
+      return res.status(202).json({ ok: true });
+    } finally {
+      // Released on every path - success, refusal, or dispatch failure - so
+      // a crash mid-handler cannot lock the user out past the TTL, and a
+      // legitimate next Start (once the session itself reflects the result)
+      // is never blocked by a stale claim.
+      await releaseClaim(startClaim);
+    }
   }
 
   if (action === "sleep") {
@@ -194,28 +218,17 @@ export default async function handler(req, res) {
     if (!(await hasSavedData(target))) {
       return res.status(404).json({ error: "no saved data to delete" });
     }
-    // The volume cannot be deleted while attached, and deleting it under a live
-    // desktop would corrupt whatever is mid-write. Refuse here with a reason
-    // rather than letting the workflow fail minutes later.
-    if (live.includes(sessions[target]?.status)) {
-      return res.status(409).json({
-        error: "that desktop is running - destroy it first, then delete the data",
-      });
-    }
-    // A sleeping machine has NO session record at all - the check above would
-    // miss it, and would have let a wipe through while a stopped machine's
-    // volume is still attached. The wipe workflow now detaches from a stopped
-    // machine and deletes, so that is no longer unsafe, but a still-running or
-    // still-building machine has no session gap to close: refuse here too, and
-    // tell the user the truth instead of letting the workflow fail later.
+    // The volume cannot be deleted while attached, and deleting it under a
+    // live desktop would corrupt whatever is mid-write. Refuse here with a
+    // reason rather than letting the workflow fail minutes later. Checks
+    // both the session AND the machine record - see wipeRefusalReason's own
+    // comment for why either alone is not enough (a sleeping machine has NO
+    // session record at all, and a session can be live before any machine
+    // record exists).
     const targetMachines = await loadMachines();
-    const liveMachine = MACHINE_OSES.some((os) =>
-      ["running", "building"].includes(targetMachines[machineKey(target, os)]?.state)
-    );
-    if (liveMachine) {
-      return res.status(409).json({
-        error: "that desktop is running or still building - destroy it first, then delete the data",
-      });
+    const wipeRefusal = wipeRefusalReason(targetMachines, sessions, target);
+    if (wipeRefusal) {
+      return res.status(409).json({ error: wipeRefusal });
     }
     await logEvent("wipe_requested", { username: target, by: me });
     try {

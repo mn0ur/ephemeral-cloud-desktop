@@ -48,3 +48,36 @@ export function startPlan(machines, username, os) {
   if (mine.state === "sleeping") return { action: "wake", sleepOs };
   return { action: "adopt", sleepOs };
 }
+
+// Whether a wipe of `username`'s saved data must be refused, and why. Pulled
+// out of the dispatch handler so the two things it actually checks - the
+// session status, and the machine's own state - are unit-testable without a
+// mocked request/response pair.
+//
+// Sessions and machines are separate hashes, written by different callbacks,
+// and are NOT updated atomically - "session says running, machine says
+// sleeping" (or the reverse) is an expected transient, not a bug. A sleeping
+// machine has NO session record at all, so checking sessions alone would let
+// a wipe through against a machine that merely LOOKS gone because nobody
+// updated its session yet. Checking machines alone would miss a session
+// that is live (building/waking) before any machine record exists at all.
+// Both are checked; either one being "live" refuses.
+//
+// Keep this status list in step with LIVE_STATUSES in lib/desktops.js - not
+// imported from there because this file imports nothing (see the top of the
+// file: state.js imports this module, and a cycle back would break the
+// serverless bundle).
+const SESSION_LIVE_STATUSES = ["pending", "building", "waking", "ready", "active"];
+
+export function wipeRefusalReason(machines, sessions, username) {
+  if (SESSION_LIVE_STATUSES.includes(sessions[username]?.status)) {
+    return "that desktop is running - destroy it first, then delete the data";
+  }
+  const liveMachine = MACHINE_OSES.some((os) =>
+    ["running", "building"].includes(machines[machineKey(username, os)]?.state)
+  );
+  if (liveMachine) {
+    return "that desktop is running or still building - destroy it first, then delete the data";
+  }
+  return null;
+}

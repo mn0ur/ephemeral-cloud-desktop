@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MACHINE_OSES, machineKey, startPlan, missingOses } from "../lib/machines.js";
+import { MACHINE_OSES, machineKey, startPlan, missingOses, wipeRefusalReason } from "../lib/machines.js";
 
 const m = (state, os) => ({ os, state, instance_id: "i-1" });
 
@@ -65,4 +65,32 @@ test("startPlan: the OS switch is a sleep then a wake, never two machines runnin
   // after the sleep lands, the same call plans a plain wake
   const after = { ...machines, "alice:linux": { os: "linux", state: "sleeping" } };
   assert.deepEqual(startPlan(after, "alice", "windows"), { action: "wake", sleepOs: null });
+});
+
+test("wipeRefusalReason: a sleeping machine with no session is fine, a running one with no session is not", () => {
+  // A parked machine has NO session record at all - that must not read as
+  // "safe to wipe" just because the session hash has nothing for this user.
+  const sleeping = { "alice:linux": m("sleeping", "linux") };
+  assert.equal(wipeRefusalReason(sleeping, {}, "alice"), null);
+
+  // The transient the guard exists for: sessions and machines are separate
+  // hashes updated by different callbacks, so "no session, but the machine
+  // is still running" is an expected state to see, not a bug - and it must
+  // still refuse.
+  const running = { "alice:linux": m("running", "linux") };
+  assert.match(wipeRefusalReason(running, {}, "alice"), /running or still building/);
+
+  // A still-building machine refuses the same way.
+  const building = { "alice:windows": m("building", "windows") };
+  assert.match(wipeRefusalReason(building, {}, "alice"), /running or still building/);
+
+  // A live session refuses even before any machine record exists.
+  assert.match(
+    wipeRefusalReason({}, { alice: { status: "building" } }, "alice"),
+    /destroy it first/
+  );
+
+  // Someone else's running machine never blocks this user's wipe.
+  const others = { "bob:linux": m("running", "linux") };
+  assert.equal(wipeRefusalReason(others, {}, "alice"), null);
 });

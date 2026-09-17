@@ -69,9 +69,9 @@ variable "instance_type" {
 }
 
 variable "use_spot" {
-  description = "Set false to fall back to on-demand when spot capacity is unavailable."
+  description = "Spot cannot be stopped and resumed, only terminated - and every machine this stack builds is parked when unused. Default false. Set true only for a throwaway machine that will never sleep."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "root_volume_gb" {

@@ -172,13 +172,41 @@ function renderMine(s) {
     const startSub = s.has_machines
       ? '<div class="sub">Ready in about a minute.</div>'
       : '<div class="sub">Setting up your first desktop takes about 3 minutes.</div>';
+    // A parked machine has no session, so this Start card is the ONLY screen
+    // it ever appears on - and until it was listed here it could not be
+    // deleted at all, quietly costing its disk (~$4/month Windows, ~$2.50
+    // Linux) forever. Server sends state, os and hostname only; no secret of
+    // any kind, and never another user's machine.
+    const machineRows = Object.values(s.machines || {})
+      .map((m) => {
+        const label = m.os === "windows" ? "Windows" : "Linux";
+        const state = m.state === "sleeping" ? "asleep"
+          : m.state === "running" ? "running"
+          : m.state === "building" ? "being set up"
+          : m.state === "deleting" ? "being deleted"
+          : esc(m.state || "unknown");
+        const canDelete = m.state !== "deleting";
+        return `<div class="row machine-row">
+            <span>${label} &middot; <span class="sub">${state}</span></span>
+            ${canDelete ? `<button type="button" class="stop machine-del" data-os="${esc(m.os)}">Delete</button>` : ""}
+          </div>`;
+      })
+      .join("");
+    const machineBlock = machineRows
+      ? `<div class="steps"><div class="sub">Your machines</div>${machineRows}
+          <div class="sub">Deleting one frees its disk. Your saved files are kept.</div></div>`
+      : "";
     box.innerHTML = `
       ${noticeBlock}
       ${osSelect}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
       ${startSub}
+      ${machineBlock}
       ${dataBlock}`;
     $("start").onclick = () => go("start");
+    box.querySelectorAll(".machine-del").forEach((b) => {
+      b.onclick = () => go("delete", { os: b.dataset.os });
+    });
     if ($("wipe")) $("wipe").onclick = wipeData;
     return;
   }
@@ -243,14 +271,17 @@ function renderMine(s) {
   }
 
   if (phase === "waking") {
-    let html = `<div class="status"><span class="dot work"></span> Waking your ${osLabel} desktop&hellip;</div>` +
+    // No Cancel here, deliberately. A wake acts on a machine that ALREADY
+    // exists and is full of the user's installed software, and the only thing
+    // Cancel could dispatch is a delete - it offered to "remove the machine
+    // being created" and would instead have destroyed their real one. A wake
+    // is about a minute; there is nothing here worth cancelling.
+    const html = `<div class="status"><span class="dot work"></span> Waking your ${osLabel} desktop&hellip;</div>` +
       '<div class="sub">Your files, apps and settings are exactly as you left them.</div>' +
-      barHtml(isWin ? "wake_windows" : "wake_linux", mine.dispatched_at);
-    if (mine.can_cancel) html += '<div class="row"><button id="cancel-build" class="stop">Cancel</button></div>';
-    html += stepsHtml(s.progress);
+      barHtml(isWin ? "wake_windows" : "wake_linux", mine.dispatched_at) +
+      stepsHtml(s.progress);
     box.innerHTML = html;
     tickBars();
-    if ($("cancel-build")) $("cancel-build").onclick = () => go("delete");
     return;
   }
 
@@ -350,21 +381,31 @@ async function copyToClipboard(btn) {
   }
 }
 
-async function go(action) {
+async function go(action, opts = {}) {
   const body = { action };
   if (action === "start") {
     body.os = $("os")?.value || "linux";
   }
+  // A delete from the Start card names its machine explicitly: that machine
+  // is parked, so there is no session for the server to read an OS from.
+  if (action === "delete" && opts.os) body.os = opts.os;
   if (action === "destroy" && !confirm(lastPhase === "starting"
     ? "Cancel starting your desktop? The machine being created will be removed."
     : "Destroy your desktop? Your files are kept.")) return;
-  // Cancelling a build/wake in progress also dispatches "delete" - there is
-  // no finished machine to describe yet, so it gets the cancel wording
-  // instead of the normal "anything you installed is lost" delete wording.
-  if (action === "delete" && (lastPhase === "building" || lastPhase === "waking") && !confirm(
-    "Cancel? The machine being created will be removed."
-  )) return;
-  if (action === "delete" && lastPhase !== "building" && lastPhase !== "waking" && !confirm(
+  // Three different deletes, three different truths to tell:
+  //  - naming an OS (the Start card's parked-machine list): say WHICH machine,
+  //    and that a replacement is a full 3-minute build, not a wake;
+  //  - cancelling a BUILD: nothing is installed on it yet, so it is a cancel;
+  //  - deleting the machine in the running card: the general wording.
+  // A wake is no longer cancellable at all (see the waking card above).
+  if (action === "delete" && opts.os) {
+    const label = opts.os === "windows" ? "Windows" : "Linux";
+    if (!confirm(
+      `Delete your ${label} machine?\n\nAnything you installed on it is lost. Your saved files are kept, and a new ${label} machine takes about 3 minutes to build the next time you start one.`
+    )) return;
+  } else if (action === "delete" && lastPhase === "building") {
+    if (!confirm("Cancel? The machine being created will be removed.")) return;
+  } else if (action === "delete" && !confirm(
     "Delete this machine?\n\nAnything you installed on it is lost. Your saved files are kept, and a new machine is built next time you start (about 3 minutes)."
   )) return;
   if (action === "sleep" && !confirm(
@@ -443,6 +484,13 @@ async function poll() {
       busy = false; pendingAction = null;
     }
     if (busy && ["destroy", "delete", "sleep"].includes(pendingAction) && !s.my_session) { busy = false; pendingAction = null; }
+    // Deleting a PARKED machine has no session to disappear - the server
+    // writes one carrying the destroy anchor instead - so also clear the
+    // overlay as soon as the server confirms the destroy is under way, or the
+    // page would sit on the busy card until the workflow finished.
+    if (busy && ["destroy", "delete"].includes(pendingAction) && s.my_session?.phase === "destroying") {
+      busy = false; pendingAction = null;
+    }
 
     // Auto-open is separate from clearing busy above, and fires exactly once
     // per session becoming active - tracked on the session object itself so

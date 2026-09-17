@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MACHINE_OSES, machineKey, startPlan, missingOses, wipeRefusalReason } from "../lib/machines.js";
+import {
+  MACHINE_OSES, machineKey, startPlan, missingOses, wipeRefusalReason, pendingWakeAction,
+} from "../lib/machines.js";
 
 const m = (state, os) => ({ os, state, instance_id: "i-1" });
 
@@ -93,4 +95,40 @@ test("wipeRefusalReason: a sleeping machine with no session is fine, a running o
   // Someone else's running machine never blocks this user's wipe.
   const others = { "bob:linux": m("running", "linux") };
   assert.equal(wipeRefusalReason(others, {}, "alice"), null);
+});
+
+test("missingOses drives the sign-in build: nothing to build once both exist", () => {
+  const building = { "alice:linux": { os: "linux", state: "building" } };
+  assert.deepEqual(missingOses(building, "alice"), ["windows"]);
+  const both = { ...building, "alice:windows": { os: "windows", state: "building" } };
+  assert.deepEqual(missingOses(both, "alice"), []);
+});
+
+test("pendingWakeAction: the controller-ruling gap - a switch to an OS the user never had must build, not wake", () => {
+  // Task 5's handler only ever dispatched a wake for the pending OS, which
+  // left a user with nothing at all if they switched to an OS they have no
+  // machine for while their other one was running. This is the fix: build
+  // when there is no machine record yet for that OS...
+  assert.equal(pendingWakeAction({}, "alice", "windows"), "build");
+  assert.equal(
+    pendingWakeAction({ "alice:linux": m("running", "linux") }, "alice", "windows"),
+    "build"
+  );
+  // ...and wake when a machine record already exists for it, parked or not -
+  // pendingWakeAction does not need to distinguish sleeping from running
+  // here, because session-slept only calls it for the OS the switch is going
+  // TO, which by construction is never the one that just stopped.
+  assert.equal(
+    pendingWakeAction({ "alice:windows": m("sleeping", "windows") }, "alice", "windows"),
+    "wake"
+  );
+  assert.equal(
+    pendingWakeAction({ "alice:windows": m("running", "windows") }, "alice", "windows"),
+    "wake"
+  );
+  // Someone else's machine for that OS never counts as this user's.
+  assert.equal(
+    pendingWakeAction({ "bob:windows": m("running", "windows") }, "alice", "windows"),
+    "build"
+  );
 });

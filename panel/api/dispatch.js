@@ -120,6 +120,10 @@ export default async function handler(req, res) {
         dispatched_at: Date.now() / 1000,
         os,
         region,
+        // The user just pressed Start - session-ready must not mistake this
+        // for the sign-in build in api/status.js and park it the moment it
+        // comes up.
+        start_requested: true,
       });
       await logEvent("login_start", { username: me, email: session.email, persist: true, os, region });
 

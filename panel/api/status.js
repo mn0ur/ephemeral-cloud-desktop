@@ -1,12 +1,14 @@
 import { sessionFromRequest, GOOGLE_CLIENT_ID } from "../lib/auth.js";
 import {
   loadSessions, putSession, dropSession, hasSavedData, stateConfigured, getNotice, getHealth, putHealth,
+  loadMachines, putMachine, claimOnce, releaseClaim,
 } from "../lib/state.js";
-import { runProgress, tokenConfigured } from "../lib/github.js";
+import { dispatch, WORKFLOWS, runProgress, tokenConfigured } from "../lib/github.js";
 import {
   refreshOwn, activeCount, MAX_CONCURRENT, HOURLY_USD, HOURLY_USD_WINDOWS, DESKTOP_DOMAIN, REGIONS,
   sessionPhase, canCancel, hourlyRate,
 } from "../lib/desktops.js";
+import { missingOses } from "../lib/machines.js";
 
 export default async function handler(req, res) {
   // Never cached: the page polls this to decide what to render, and a cached
@@ -28,6 +30,57 @@ export default async function handler(req, res) {
 
   if (session) {
     sessions = await refreshOwn(sessions, session.user_id, { putSession, dropSession, getHealth, putHealth });
+  }
+
+  // A permanent user's two machines are built the first time they sign in, so
+  // that even their first Start is a ~1 minute wake rather than a ~3 minute
+  // build. Each build is claimed once (build:<user>:<os>), so a refresh or a
+  // second tab cannot start duplicates - and on every poll AFTER the first,
+  // the claim just fails fast and nothing is dispatched at all. That claim
+  // has a different key from the start:<user> claim in api/dispatch.js, so
+  // the two never contend for the same lock: a sign-in build and a manual
+  // Start of the OTHER os could in principle race, but startPlan/session-ready
+  // already treat "machine already building" as adopt, not a second build.
+  //
+  // This runs inside the 5s status poll under a 10s function limit
+  // (vercel.json), so the two dispatches (at most one per OS) are fired
+  // together with Promise.allSettled rather than one after another - a slow
+  // GitHub API then costs one round trip's worth of latency, not two, and it
+  // costs that only on the single poll that wins each claim.
+  if (session?.has_access && tokenConfigured) {
+    const machines = await loadMachines();
+    const own = sessions[session.user_id];
+    await Promise.allSettled(
+      missingOses(machines, session.user_id).map(async (os) => {
+        // A manual Start (api/dispatch.js) also writes status "building" for
+        // its os BEFORE any machine record exists - the record is only
+        // written by session-ready once the build finishes. Without this
+        // check that in-flight manual build would look exactly like a
+        // "missing machine" to this loop too, on every poll until the
+        // record appears, and get built a second time. dispatch.js's
+        // start:<user> claim does not protect against this - it is released
+        // as soon as that handler returns, long before the build completes.
+        if (own?.os === os && own?.status === "building") return;
+        const claim = `build:${session.user_id}:${os}`;
+        if (!(await claimOnce(claim, 1800))) return;
+        try {
+          await dispatch(WORKFLOWS.start, {
+            username: session.user_id, guest_username: session.user_id,
+            owner_email: session.email, fresh: "false", persist: "true",
+            is_guest: "false", use_spot: "false", os, region: "ap-south-1",
+          });
+          await putMachine(session.user_id, os, {
+            os, state: "building", created_at: Date.now() / 1000,
+          });
+        } catch (e) {
+          // A failed dispatch must release the claim - otherwise this OS
+          // would never be retried on a later poll until the 30-minute TTL
+          // expires, and the user would be stuck without a machine.
+          await releaseClaim(claim);
+          console.error("sign-in build failed", os, e.message);
+        }
+      })
+    );
   }
 
   // Non-admins see only their own session. Never anyone else's email, URL or

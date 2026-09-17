@@ -2,6 +2,7 @@ import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
 import { loadSessions, putSession, logEvent, clearHealth, loadMachines, putMachine } from "../lib/state.js";
 import { REGIONS, hashToken } from "../lib/desktops.js";
 import { machineKey } from "../lib/machines.js";
+import { dispatch, WORKFLOWS } from "../lib/github.js";
 
 // Called by desktop-up.yml once terraform apply succeeds. This deployment holds
 // no AWS or Terraform credentials by design, so it cannot read `terraform
@@ -69,6 +70,27 @@ export default async function handler(req, res) {
     last_woken_at: Date.now() / 1000,
     ...(req.body?.session_token ? { lost_token_hash: hashToken(req.body.session_token) } : {}),
   });
+
+  // Built but not asked for: park it, so the user pays disk and not
+  // $0.36/hour for a machine they have not opened. This only fires for a
+  // sign-in build (prior.status was "building" or there was no session at
+  // all) that nobody flagged start_requested - a manual Start (dispatch.js)
+  // and an OS-switch build (session-slept.js) both set that flag, so a
+  // machine the user actually asked for stays running.
+  if ((!prior.status || prior.status === "building") && !prior.start_requested) {
+    try {
+      await dispatch(WORKFLOWS.sleep, { guest_username: username, os });
+      const latest = (await loadSessions())[username];
+      if (latest) {
+        await putSession(username, { ...latest, sleep_dispatched_at: Date.now() / 1000 });
+      }
+    } catch (e) {
+      // Nothing to roll back: the machine stays running, and it'll just cost
+      // an extra hour until someone notices or a future build succeeds in
+      // parking it. Never fail this callback over it - the machine IS ready.
+      console.error("park-after-build dispatch failed", os, e.message);
+    }
+  }
 
   await logEvent("start", { username, email, url: req.body?.url, os, region });
   return res.status(200).json({ ok: true });

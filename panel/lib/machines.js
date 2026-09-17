@@ -26,6 +26,17 @@ export function missingOses(machines, username) {
   return MACHINE_OSES.filter((os) => !machines[machineKey(username, os)]);
 }
 
+// What to dispatch for the OS a user is switching TO, once their other
+// machine has actually stopped (api/session-slept.js). A switch is
+// "sleep the running one, then bring up the one asked for" - and "bring up"
+// means build when that OS has no machine at all yet, wake when it does
+// (parked or otherwise; session-slept only ever reaches this once the OTHER
+// os has just been confirmed asleep, so `os` itself cannot be the one that
+// just stopped).
+export function pendingWakeAction(machines, username, os) {
+  return machines[machineKey(username, os)] ? "wake" : "build";
+}
+
 // What Start should do, and whether the user's OTHER machine has to be put to
 // sleep first. Only one machine per user runs at a time, so nobody can run up
 // two hourly bills at once (spec decision, 2026-09-17).

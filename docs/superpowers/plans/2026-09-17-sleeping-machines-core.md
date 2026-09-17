@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-17-sleeping-machines-design.md` (Plan A shipped in PR #33; Plan C is auto-sleep + the admin machine list)
 
+**Post-implementation note (2026-09-17):** Tasks 3 and 6 below describe a
+standalone `panel/api/session-slept.js`. That file was folded into
+`panel/api/session-ended.js` (as `reason: "slept"`) right after this plan was
+executed, because it made `panel/api/` the 13th Serverless Function and the
+Vercel Hobby plan caps a deployment at 12 -
+`exceeded_serverless_functions_per_deployment` on deploy. Every
+`session-slept.js` reference below is what was actually built at the time;
+read it as `session-ended.js`'s `reason: "slept"` branch.
+
 ## Global Constraints
 
 - The repo is PUBLIC: never route a secret through a `workflow_dispatch` input, never print a secret into a log or report.

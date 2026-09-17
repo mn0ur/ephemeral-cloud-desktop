@@ -24,17 +24,26 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # Shares the per-user lifecycle group, so a wipe can never race that user's
-  # own start or destroy - which is exactly when the volume's attachment
-  # state is changing underneath us.
-  group: desktop-lifecycle-${{ inputs.guest_username }}
-  cancel-in-progress: false
+# No workflow-level concurrency group here on purpose (2026-09-17): each OS's
+# volume is independent, so the two jobs below each hold their OWN per-OS
+# lifecycle group (desktop-lifecycle-<user>-linux / -windows), matching
+# desktop-up.yml/desktop-down.yml. That is what keeps a wipe from racing that
+# user's start or destroy for the SAME os - it does not block the other os's
+# wipe, which is safe because they touch different volumes.
 
 jobs:
-  wipe:
-    name: delete saved data
+  wipe-linux:
+    name: delete saved data (linux)
     runs-on: ubuntu-latest
+
+    concurrency:
+      # Same group a Linux start/destroy holds, so a wipe can never run while
+      # that user's Linux session's volume attachment is changing underneath
+      # it (start's guest-setup step looks up/creates the volume BEFORE
+      # Terraform attaches it - a window where the volume reads "available"
+      # and a racing wipe would delete it out from under the apply).
+      group: desktop-lifecycle-${{ inputs.guest_username }}-linux
+      cancel-in-progress: false
 
     # Deleting a volume is a handful of API calls; anything longer is stuck.
     timeout-minutes: 15
@@ -63,64 +72,91 @@ jobs:
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
 
-      - name: Delete the volume
+      - name: Delete the Linux volume
         env:
           HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
-          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.mnour.dev' }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
         run: |
           set -uo pipefail
           USER="${{ inputs.guest_username }}"
+          ROLE=desktop-guest-data
 
           DELETED=0
           BLOCKED=""
-          # Both regions, both roles: "delete my data" means all of it,
-          # wherever the user's sessions have run. Same tag pair the start
-          # workflow uses, so this can only match this user's desktop data
-          # volumes - never the owner's, the hub's, or a root disk.
+          # Set when the volume had to be detached from a STOPPED (sleeping)
+          # machine - that machine is left unbootable by the delete below.
+          WAS_SLEEPING=0
+          # This job only ever touches the Linux data role. Same tag pair the
+          # start workflow uses, so this can only match this user's Linux
+          # desktop data volume - never the owner's, the hub's, or a root disk.
           for AWS_REGION in ap-south-1; do
             export AWS_REGION
             export AWS_DEFAULT_REGION="$AWS_REGION"
-            for ROLE in desktop-guest-data desktop-guest-data-windows; do
-              read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes --region "$AWS_REGION" \
-                --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=$ROLE" \
-                --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
-              if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
-                echo "no $ROLE volume for '$USER' in $AWS_REGION"
-                continue
+            read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes --region "$AWS_REGION" \
+              --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=$ROLE" \
+              --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
+            if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
+              echo "no $ROLE volume for '$USER' in $AWS_REGION"
+              continue
+            fi
+            echo "$AWS_REGION/$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
+            # A sleeping machine is STOPPED but keeps its data volume attached
+            # (Plan B, Task 3) - that is normal, not a live desktop mid-write.
+            # If the instance holding this volume is stopped, detach it here
+            # and proceed with the delete. Still refuse whenever the attached
+            # instance is running/pending (or its state can't be read): deleting
+            # a volume out from under a live desktop must stay impossible.
+            INSTANCE_STATE=""
+            if [ "$STATE" != "available" ] && [ -n "$ATTACHED" ] && [ "$ATTACHED" != "None" ]; then
+              INSTANCE_STATE=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$ATTACHED" \
+                --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || true)
+              if [ "$INSTANCE_STATE" = "stopped" ]; then
+                echo "$VOL is attached to stopped instance $ATTACHED (sleeping) - detaching before delete"
+                aws ec2 detach-volume --region "$AWS_REGION" --volume-id "$VOL"
+                aws ec2 wait volume-available --region "$AWS_REGION" --volume-ids "$VOL"
+                STATE=available
+                # That machine is now a machine whose data disk is gone. A
+                # wake runs no Terraform, so it would boot expecting a volume
+                # that no longer exists while the panel showed it Running -
+                # the panel is told to tombstone it below, so the next Start
+                # builds a whole machine instead of waking a broken one.
+                WAS_SLEEPING=1
               fi
-              echo "$AWS_REGION/$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
-              # Refuse while attached: deleting under a running desktop corrupts
-              # whatever is mid-write, and AWS rejects it anyway. Record it and
-              # keep going - one attached role must not strand the other role's
-              # volume or skip the data-wiped callback below.
-              if [ "$STATE" != "available" ]; then
-                echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
-                BLOCKED="$BLOCKED $AWS_REGION/$ROLE:$VOL"
-                continue
-              fi
-              aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$VOL"
-              echo "deleted $VOL in $AWS_REGION"
-              DELETED=$((DELETED+1))
-              sleep 3
-              if aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$VOL" >/dev/null 2>&1; then
-                echo "::warning::$VOL still visible - deletion may still be settling."
-              else
-                echo "confirmed: $VOL no longer exists"
-              fi
-            done
+            fi
+            # Refuse while still attached: deleting under a running desktop
+            # corrupts whatever is mid-write, and AWS rejects it anyway.
+            # Record it and keep going rather than failing right away, so the
+            # callback below still runs for a successful delete before this
+            # job exits 1.
+            if [ "$STATE" != "available" ]; then
+              echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}, instance state ${INSTANCE_STATE:-unknown}). Destroy the desktop first."
+              BLOCKED="$BLOCKED $AWS_REGION/$ROLE:$VOL"
+              continue
+            fi
+            aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$VOL"
+            echo "deleted $VOL in $AWS_REGION"
+            DELETED=$((DELETED+1))
+            sleep 3
+            if aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$VOL" >/dev/null 2>&1; then
+              echo "::warning::$VOL still visible - deletion may still be settling."
+            else
+              echo "confirmed: $VOL no longer exists"
+            fi
           done
           if [ "$DELETED" -eq 0 ] && [ -z "$BLOCKED" ]; then
-            echo "No saved data volumes for '$USER' - nothing to delete."
+            echo "No Linux saved data volume for '$USER' - nothing to delete."
             echo "NOTHING_TO_DO=true" >> "$GITHUB_ENV"
             exit 0
           fi
 
           if [ "$DELETED" -gt 0 ] && [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+            TOMBSTONE=false
+            if [ "$WAS_SLEEPING" -eq 1 ]; then TOMBSTONE=true; fi
             curl -fsS -X POST "$PANEL_URL/api/data-wiped" \
               -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
-              -d "{\"username\":\"$USER\"}" \
-              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone"
+              -d "{\"username\":\"$USER\",\"os\":\"linux\",\"tombstone_machine\":$TOMBSTONE}" \
+              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone, and may still try to wake a machine whose data volume was just deleted"
           fi
 
           if [ -n "$BLOCKED" ]; then
@@ -131,14 +167,158 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## Saved data deleted"
+            echo "## Saved data deleted (Linux)"
             echo ""
             if [ "${NOTHING_TO_DO:-false}" = "true" ]; then
-              echo "No volume existed for \`${{ inputs.guest_username }}\`. Nothing was changed."
+              echo "No Linux volume existed for \`${{ inputs.guest_username }}\`. Nothing was changed."
             else
-              echo "The saved data for \`${{ inputs.guest_username }}\` has been permanently deleted."
+              echo "The Linux saved data for \`${{ inputs.guest_username }}\` has been permanently deleted."
               echo ""
-              echo "Their next desktop starts from a clean image. If they start with"
+              echo "Their next Linux desktop starts from a clean image. If they start with"
+              echo "\"keep my data\" again, a new empty volume is created."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  wipe-windows:
+    name: delete saved data (windows)
+    runs-on: ubuntu-latest
+
+    concurrency:
+      # Same group a Windows start/destroy holds - see wipe-linux above for
+      # why this must match per-OS, not the whole user.
+      group: desktop-lifecycle-${{ inputs.guest_username }}-windows
+      cancel-in-progress: false
+
+    # Deleting a volume is a handful of API calls; anything longer is stuck.
+    timeout-minutes: 15
+
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "DELETE" ]; then
+            echo "::error::Confirmation failed. Type DELETE exactly."
+            exit 1
+          fi
+          if [ -z "${{ inputs.guest_username }}" ]; then
+            echo "::error::guest_username is required - refusing to run without a target."
+            exit 1
+          fi
+
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::AWS secrets are not set."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+
+      - name: Delete the Windows volume
+        env:
+          HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
+        run: |
+          set -uo pipefail
+          USER="${{ inputs.guest_username }}"
+          ROLE=desktop-guest-data-windows
+
+          DELETED=0
+          BLOCKED=""
+          # Set when the volume had to be detached from a STOPPED (sleeping)
+          # machine - that machine is left unbootable by the delete below.
+          WAS_SLEEPING=0
+          # This job only ever touches the Windows data role. Same tag pair the
+          # start workflow uses, so this can only match this user's Windows
+          # desktop data volume - never the owner's, the hub's, or a root disk.
+          for AWS_REGION in ap-south-1; do
+            export AWS_REGION
+            export AWS_DEFAULT_REGION="$AWS_REGION"
+            read -r VOL STATE ATTACHED <<<"$(aws ec2 describe-volumes --region "$AWS_REGION" \
+              --filters "Name=tag:Owner,Values=$USER" "Name=tag:Role,Values=$ROLE" \
+              --query 'Volumes[0].[VolumeId,State,Attachments[0].InstanceId]' --output text)"
+            if [ "$VOL" = "None" ] || [ -z "$VOL" ]; then
+              echo "no $ROLE volume for '$USER' in $AWS_REGION"
+              continue
+            fi
+            echo "$AWS_REGION/$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
+            # A sleeping machine is STOPPED but keeps its data volume attached
+            # (Plan B, Task 3) - that is normal, not a live desktop mid-write.
+            # If the instance holding this volume is stopped, detach it here
+            # and proceed with the delete. Still refuse whenever the attached
+            # instance is running/pending (or its state can't be read): deleting
+            # a volume out from under a live desktop must stay impossible.
+            INSTANCE_STATE=""
+            if [ "$STATE" != "available" ] && [ -n "$ATTACHED" ] && [ "$ATTACHED" != "None" ]; then
+              INSTANCE_STATE=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$ATTACHED" \
+                --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || true)
+              if [ "$INSTANCE_STATE" = "stopped" ]; then
+                echo "$VOL is attached to stopped instance $ATTACHED (sleeping) - detaching before delete"
+                aws ec2 detach-volume --region "$AWS_REGION" --volume-id "$VOL"
+                aws ec2 wait volume-available --region "$AWS_REGION" --volume-ids "$VOL"
+                STATE=available
+                # That machine is now a machine whose data disk is gone. A
+                # wake runs no Terraform, so it would boot expecting a volume
+                # that no longer exists while the panel showed it Running -
+                # the panel is told to tombstone it below, so the next Start
+                # builds a whole machine instead of waking a broken one.
+                WAS_SLEEPING=1
+              fi
+            fi
+            # Refuse while still attached: deleting under a running desktop
+            # corrupts whatever is mid-write, and AWS rejects it anyway.
+            # Record it and keep going rather than failing right away, so the
+            # callback below still runs for a successful delete before this
+            # job exits 1.
+            if [ "$STATE" != "available" ]; then
+              echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}, instance state ${INSTANCE_STATE:-unknown}). Destroy the desktop first."
+              BLOCKED="$BLOCKED $AWS_REGION/$ROLE:$VOL"
+              continue
+            fi
+            aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$VOL"
+            echo "deleted $VOL in $AWS_REGION"
+            DELETED=$((DELETED+1))
+            sleep 3
+            if aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$VOL" >/dev/null 2>&1; then
+              echo "::warning::$VOL still visible - deletion may still be settling."
+            else
+              echo "confirmed: $VOL no longer exists"
+            fi
+          done
+          if [ "$DELETED" -eq 0 ] && [ -z "$BLOCKED" ]; then
+            echo "No Windows saved data volume for '$USER' - nothing to delete."
+            echo "NOTHING_TO_DO=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          if [ "$DELETED" -gt 0 ] && [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+            TOMBSTONE=false
+            if [ "$WAS_SLEEPING" -eq 1 ]; then TOMBSTONE=true; fi
+            curl -fsS -X POST "$PANEL_URL/api/data-wiped" \
+              -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"$USER\",\"os\":\"windows\",\"tombstone_machine\":$TOMBSTONE}" \
+              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone, and may still try to wake a machine whose data volume was just deleted"
+          fi
+
+          if [ -n "$BLOCKED" ]; then
+            echo "::error::still attached, not deleted:$BLOCKED - destroy the desktop first, then delete the data"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "## Saved data deleted (Windows)"
+            echo ""
+            if [ "${NOTHING_TO_DO:-false}" = "true" ]; then
+              echo "No Windows volume existed for \`${{ inputs.guest_username }}\`. Nothing was changed."
+            else
+              echo "The Windows saved data for \`${{ inputs.guest_username }}\` has been permanently deleted."
+              echo ""
+              echo "Their next Windows desktop starts from a clean image. If they start with"
               echo "\"keep my data\" again, a new empty volume is created."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

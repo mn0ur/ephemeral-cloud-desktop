@@ -1,0 +1,131 @@
+name: Desktop - SLEEP
+# One label per user and OS: the panel shows a user ONLY their own run and
+# matches on this name (panel/lib/desktops.js runBelongsTo).
+run-name: "Desktop - SLEEP · ${{ inputs.guest_username }} · ${{ inputs.os }}"
+
+# Stops the machine; it is NOT destroyed. The root disk, installed apps and
+# settings all survive, which is the whole point: the next Start is a ~1 minute
+# wake instead of a ~3 minute build. Terraform is never run here - the machine
+# stays in its state file exactly as it is.
+on:
+  workflow_dispatch:
+    inputs:
+      guest_username:
+        description: "Whose machine to put to sleep."
+        required: true
+      os:
+        description: "Which of that user's two machines."
+        type: choice
+        options: [linux, windows]
+        default: linux
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-lifecycle-${{ inputs.guest_username }}-${{ inputs.os }}
+  cancel-in-progress: false
+
+jobs:
+  sleep:
+    name: stop the machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_REGION: ap-south-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::AWS secrets are not set."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
+
+      - name: Stop the machine and park its hostname
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
+          CF_ZONE: sihaab.com
+        run: |
+          set -uo pipefail
+          USER_NAME="${{ inputs.guest_username }}"
+          OS="${{ inputs.os }}"
+
+          # Find this user's machine by tag. Owner+OS is unique: one machine per
+          # user per OS (panel/lib/machines.js). Query per-INSTANCE, not
+          # per-reservation: Reservations[].Instances[0] would silently collapse
+          # a duplicate/retried build (two reservations) down to one ID, and
+          # stopping only one of two real instances is exactly the kind of
+          # "reported success, actually half-done" bug this step must not have.
+          IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Owner,Values=$USER_NAME" "Name=tag:OS,Values=$OS" \
+              "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ $? -ne 0 ]; then
+            echo "::error::describe-instances failed while looking up the $OS machine for $USER_NAME - aborting, nothing was touched"
+            exit 1
+          fi
+
+          COUNT=0
+          if [ -n "$IDS" ] && [ "$IDS" != "None" ]; then
+            COUNT=$(echo "$IDS" | wc -w)
+          fi
+
+          # No match and more-than-one match are both refused loudly (exit
+          # non-zero, no DNS park, no callback) so the panel's existing record
+          # is left exactly as it was - a red run beats a false "parked".
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::no $OS machine found for $USER_NAME - nothing to stop; the panel's record is left untouched"
+            exit 1
+          fi
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::$COUNT $OS instances matched Owner=$USER_NAME ($IDS) - refusing to guess which one to stop, this is an anomaly for a human to look at"
+            exit 1
+          fi
+
+          ID="$IDS"
+          echo "stopping $ID"
+          # Checked explicitly rather than relying on -e (which is deliberately
+          # not set, so the messages below stay attributable to the exact
+          # command that failed): an unchecked stop-instances would let the
+          # script wait on an instance nobody actually told to stop.
+          if ! aws ec2 stop-instances --instance-ids "$ID" >/dev/null; then
+            echo "::error::stop-instances failed for $ID - it may still be running; aborting before DNS park or callback"
+            exit 1
+          fi
+          # An instance already in state "stopped" is success here, not a
+          # failure - both stop-instances and this wait return immediately for
+          # it, so no special-casing is needed.
+          if ! aws ec2 wait instance-stopped --instance-ids "$ID"; then
+            echo "::error::stop did not confirm for $ID within the wait - aborting before DNS park or callback; the panel's record is left untouched"
+            exit 1
+          fi
+
+          # Only reached once the stop is confirmed. Park the hostname on an
+          # unroutable address while the machine sleeps, so the name never
+          # points at whatever takes that IP next, then tell the panel.
+          HOST="$USER_NAME.desktop.sihaab.com"
+          [ "$OS" = "windows" ] && HOST="$USER_NAME-desktop.sihaab.com"
+          bash scripts/set-dns.sh "$HOST" 192.0.2.1 "$CF_ZONE" false || echo "::warning::DNS park failed for $HOST"
+
+          if [ -n "$HUB_CALLBACK_SECRET" ]; then
+            # session-slept.js was folded into session-ended.js (the Hobby
+            # plan's 12-function cap, hit 2026-09-17) - "slept" is now just
+            # one of session-ended's `reason` values. Fires only here, once
+            # the stop above is confirmed.
+            curl -fsS -X POST "$PANEL_URL/api/session-ended" \
+              -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"$USER_NAME\",\"os\":\"$OS\",\"reason\":\"slept\"}" \
+              || echo "::warning::callback failed - the machine IS stopped; the panel will catch up on its next probe"
+          fi

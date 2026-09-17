@@ -60,9 +60,9 @@ on:
         type: boolean
         default: false
       use_spot:
-        description: "Linux only - Windows is always on-demand (terraform local.spot). Spot is ~2.5x cheaper for Linux but can have no capacity; the apply then retries on-demand by itself. Set false to skip spot entirely."
+        description: "Spot cannot be stopped and resumed, only terminated - and every machine this panel builds is parked when unused. Default false. true is for a throwaway machine that will never sleep."
         type: boolean
-        default: true
+        default: false
       os:
         description: "linux (default) or windows. Windows boots the baked Server 2025 + DCV image on instance_type_windows, always behind a Cloudflare-proxied hostname, with the user's NTFS volume as D:. Offered to every tier from the panel."
         type: choice
@@ -82,11 +82,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Per-username, not global: two different guests must never queue behind
-  # each other, and neither may race a second apply targeting the SAME
-  # username. Empty username -> "desktop-lifecycle-", the owner's own group,
-  # unchanged from before this section existed.
-  group: desktop-lifecycle-${{ inputs.guest_username }}
+  # Per username AND OS: a user's Windows and Linux machines are independent,
+  # so a Windows start must not queue behind a Linux one. Two runs for the SAME
+  # machine still serialise, which is what protects the state lock.
+  group: desktop-lifecycle-${{ inputs.guest_username }}-${{ inputs.os }}
   cancel-in-progress: false
 
 jobs:
@@ -222,8 +221,10 @@ jobs:
 
           # Never the owner's persistent-stack password - that would hand
           # every guest the same credential the owner uses.
-          echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
+          # Masked before it is written anywhere, same rule as admin_password
+          # below: the mask must be in place before the value can travel.
           echo "::add-mask::$GUEST_PASSWORD"
+          echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Per-session reclaim token
         if: inputs.guest_username != '' && inputs.os != 'windows'
@@ -247,7 +248,8 @@ jobs:
           # can be running. The reaper is in its own group but its job times out
           # at 30 min, so a lock older than an hour belongs to no live run.
           set -uo pipefail
-          KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+          # Per user AND per OS: a user has one Linux and one Windows machine, and one OS's apply must never overwrite the other's state.
+          KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.os }}/terraform.tfstate"
           BUCKET=ephemeral-desktop-643902831477-tfstate
           LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
           CREATED=$(echo "$LOCK" | jq -r '.Created // empty' 2>/dev/null || true)
@@ -282,7 +284,8 @@ jobs:
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
-            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+            # Per user AND per OS: a user has one Linux and one Windows machine, and one OS's apply must never overwrite the other's state.
+            KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.os }}/terraform.tfstate"
           fi
           # -lock-timeout instead of failing instantly: the reaper, a manual
           # destroy and this apply can all target one username's state, and
@@ -329,6 +332,11 @@ jobs:
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)
+          # Masked the instant it is read, NOT after the callback below has
+          # already used it: a mask registered late does not retroactively
+          # scrub anything a failing command echoed in between, and this repo
+          # is public. Same rule the wake workflow follows.
+          echo "::add-mask::$PASSWORD"
           INSTANCE_ID=$(terraform -chdir=terraform output -raw instance_id)
           LOGIN_USER=$(terraform -chdir=terraform output -raw login_user)
           MARKET=$(terraform -chdir=terraform output -raw market)
@@ -362,13 +370,16 @@ jobs:
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
-          echo "::add-mask::$PASSWORD"
 
       - name: Where it is, and what it costs
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
+          # Read here, not inherited: env set with GITHUB_ENV in the callback
+          # step is not visible to this one, and an empty MARKET would quietly
+          # pick the wrong price line below.
+          MARKET=$(terraform -chdir=terraform output -raw market)
           {
             echo "## Desktop started"
             echo ""
@@ -389,6 +400,17 @@ jobs:
             echo "terraform -chdir=terraform output -raw admin_password"
             echo '```'
             echo ""
-            echo "> This is now billing at roughly \$0.10/hour. Run **Desktop - DESTROY**"
-            echo "> when finished; your data survives."
+            # Real ap-south-1 c7i.xlarge prices (AWS Price List, 2026-09-15),
+            # not the single stale ~$0.10 figure that was shown for both. The
+            # Linux line names spot too, because a Linux start uses spot when
+            # it can and only falls back to on-demand - the market output read
+            # at the top of this step says which one this run actually got.
+            if [ "${{ inputs.os }}" = "windows" ]; then
+              echo "> This is now billing at roughly \$0.3625/hour (Windows, always on-demand)."
+            elif [ "$MARKET" = "on-demand" ]; then
+              echo "> This is now billing at roughly \$0.1785/hour (Linux on-demand - spot had no capacity)."
+            else
+              echo "> This is now billing at roughly \$0.0529/hour (Linux spot; \$0.1785/hour if it falls back to on-demand)."
+            fi
+            echo "> Run **Desktop - DESTROY** when finished; your data survives."
           } >> "$GITHUB_STEP_SUMMARY"

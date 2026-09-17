@@ -5,7 +5,9 @@ import {
   sessionPhase, canCancel, CANCEL_AFTER_S, runBelongsTo,
   HOURLY_USD_ONDEMAND, UNREACHABLE_AFTER_S, HEALTH_EVERY_S, healthCheckDue, applyHealth,
   hashToken, tokenMatches, startRefusalReason,
+  sessionExpired, PENDING_TIMEOUT_S,
 } from "../lib/desktops.js";
+import { BUILD_STALE_S } from "../lib/machines.js";
 
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
   assert.equal(hourlyRate("linux"), HOURLY_USD);
@@ -54,6 +56,15 @@ test("sessionPhase: no session is null; pending is starting, never an existing m
   assert.equal(sessionPhase({ status: "pending", destroy_dispatched_at: 5 }), "destroying");
 });
 
+test("sessionPhase: a first build and a wake are different waits, and neither is 'running'", () => {
+  assert.equal(sessionPhase({ status: "building" }), "building");
+  assert.equal(sessionPhase({ status: "waking" }), "waking");
+  // a sleep in flight reads as destroying-style shutdown, not as running
+  assert.equal(sessionPhase({ status: "active", sleep_dispatched_at: 1 }), "sleeping");
+  // and an actual delete still wins
+  assert.equal(sessionPhase({ status: "active", destroy_dispatched_at: 1, sleep_dispatched_at: 1 }), "destroying");
+});
+
 test("canCancel: hidden for the first minute of a start, then allowed; always for a real machine", () => {
   const t0 = 1000;
   const starting = { status: "pending", dispatched_at: t0 };
@@ -65,6 +76,16 @@ test("canCancel: hidden for the first minute of a start, then allowed; always fo
   assert.equal(canCancel({ status: "active", url: "u", password: "p" }, t0), true);
   assert.equal(canCancel({ status: "active", destroy_dispatched_at: t0 }, t0 + 999), false);
   assert.equal(canCancel(null, t0), false);
+});
+
+test("canCancel: a first-time build and a wake get the same grace period as a plain start", () => {
+  const t0 = 1000;
+  const building = { status: "building", dispatched_at: t0 };
+  const waking = { status: "waking", dispatched_at: t0 };
+  assert.equal(canCancel(building, t0 + 5), false);
+  assert.equal(canCancel(building, t0 + 60), true);
+  assert.equal(canCancel(waking, t0 + 5), false);
+  assert.equal(canCancel(waking, t0 + 60), true);
 });
 
 test("runBelongsTo: only this user's run for this action, not a user whose name merely starts the same", () => {
@@ -145,11 +166,73 @@ test("startRefusalReason: only accounts with access may start, and only one desk
   );
   // an admin always has access
   assert.equal(startRefusalReason({ has_access: true, is_admin: true }, null), null);
-  // already running or starting: one desktop per person
-  for (const status of ["pending", "ready", "active"]) {
+  // already running or starting: one desktop per person - including the two
+  // statuses Task 5 split "pending" into, so a second Start during a build
+  // or a wake is refused too, not just during the old single "pending".
+  for (const status of ["pending", "building", "waking", "ready", "active"]) {
     assert.equal(startRefusalReason(ok, { status }), "you already have a desktop running");
   }
   // a finished/errored session is not in the way
   assert.equal(startRefusalReason(ok, { status: "error" }), null);
   assert.equal(startRefusalReason(undefined, null), "sign in first");
+});
+
+test("Fix round 3 (NB-1): a destroy that never called back stops wedging the page forever", () => {
+  // Deleting a PARKED machine writes a session that exists only to carry
+  // destroy_dispatched_at (api/dispatch.js) - it has no status at all.
+  // sessionPhase draws "destroying" on that field alone, so if the destroy
+  // workflow died (a terraform error, a runner outage) and /api/session-ended
+  // was never called, the page rendered "Shutting down" with no Start button
+  // and no way out. Nothing in the old sweep looked at that field: it only
+  // covered pending/building/waking.
+  const now = 1_000_000;
+  const pseudo = (age) => ({ os: "windows", region: "ap-south-1", destroy_dispatched_at: now - age });
+
+  assert.equal(sessionPhase(pseudo(1)), "destroying"); // what the page draws
+  assert.equal(sessionExpired(pseudo(PENDING_TIMEOUT_S - 1), now), false);
+  assert.equal(sessionExpired(pseudo(PENDING_TIMEOUT_S), now), false); // boundary is not past it
+  assert.equal(sessionExpired(pseudo(PENDING_TIMEOUT_S + 1), now), true);
+
+  // A destroy of a RUNNING desktop wedged the same way and ages out the same
+  // way - the status underneath it does not matter.
+  assert.equal(
+    sessionExpired({ status: "active", destroy_dispatched_at: now - PENDING_TIMEOUT_S - 1 }, now),
+    true
+  );
+});
+
+test("Fix round 3 (NB-2): a building session gets the same 20 minutes the machine record does", () => {
+  // dispatch.js's adopt branch anchors the session it writes on when the
+  // BUILD started, and staleBuild keeps a record adoptable for BUILD_STALE_S.
+  // Under the old 10-minute sweep a 12-minute-old build was adopted and then
+  // deleted by the very next poll - the busy overlay never cleared, no
+  // session carried start_requested, and session-ready parked the machine the
+  // user was waiting for. The two deadlines have to be the same number.
+  const now = 1_000_000;
+  const building = (age) => ({ status: "building", os: "windows", dispatched_at: now - age });
+
+  // The window that used to sweep an adoptable build:
+  assert.equal(sessionExpired(building(12 * 60), now), false);
+  // Both sides of the real boundary:
+  assert.equal(sessionExpired(building(BUILD_STALE_S - 1), now), false);
+  assert.equal(sessionExpired(building(BUILD_STALE_S + 1), now), true);
+
+  // pending and waking keep the shorter rule - neither builds anything.
+  assert.equal(sessionExpired({ status: "pending", dispatched_at: now - PENDING_TIMEOUT_S - 1 }, now), true);
+  assert.equal(sessionExpired({ status: "waking", dispatched_at: now - PENDING_TIMEOUT_S - 1 }, now), true);
+  assert.equal(sessionExpired({ status: "waking", dispatched_at: now - PENDING_TIMEOUT_S + 1 }, now), false);
+
+  // A live desktop is never swept, however long it has been up.
+  assert.equal(sessionExpired({ status: "active", started_at: now - 86400 }, now), false);
+  assert.equal(sessionExpired({ status: "ready", dispatched_at: now - 86400 }, now), false);
+  assert.equal(sessionExpired(null, now), false);
+});
+
+test("sessionExpired: a sleep whose callback never arrived is swept, like a destroy", () => {
+  const t0 = 1_800_000_000;
+  const sleeping = { status: "active", sleep_dispatched_at: t0 };
+  assert.equal(sessionExpired(sleeping, t0 + PENDING_TIMEOUT_S - 1), false);
+  assert.equal(sessionExpired(sleeping, t0 + PENDING_TIMEOUT_S + 1), true);
+  // a running session with no sleep in flight is never swept by age
+  assert.equal(sessionExpired({ status: "active" }, t0 + 99999), false);
 });

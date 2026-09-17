@@ -170,6 +170,11 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .row{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}
 .row button{flex:1;min-width:150px}
 .open{display:flex;margin-top:14px}
+/* One parked machine per line: its name and state on the left, its Delete on
+   the right. .row alone stretches every button to fill, which made a small
+   secondary action look like the page's primary one. */
+.row.machine-row{align-items:center;justify-content:space-between;margin-top:10px;gap:10px}
+.row.machine-row button{flex:0 0 auto;min-width:0;padding:6px 14px;font-size:.85rem}
 
 label{display:flex;align-items:center;gap:10px;font-size:.9rem;color:var(--text-dim);margin:10px 0 4px}
 input[type=checkbox]{accent-color:var(--gold);width:16px;height:16px}

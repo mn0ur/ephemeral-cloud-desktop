@@ -370,6 +370,10 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
+          # Read here, not inherited: env set with GITHUB_ENV in the callback
+          # step is not visible to this one, and an empty MARKET would quietly
+          # pick the wrong price line below.
+          MARKET=$(terraform -chdir=terraform output -raw market)
           {
             echo "## Desktop started"
             echo ""
@@ -390,6 +394,17 @@ jobs:
             echo "terraform -chdir=terraform output -raw admin_password"
             echo '```'
             echo ""
-            echo "> This is now billing at roughly \$0.10/hour. Run **Desktop - DESTROY**"
-            echo "> when finished; your data survives."
+            # Real ap-south-1 c7i.xlarge prices (AWS Price List, 2026-09-15),
+            # not the single stale ~$0.10 figure that was shown for both. The
+            # Linux line names spot too, because a Linux start uses spot when
+            # it can and only falls back to on-demand - the market output read
+            # at the top of this step says which one this run actually got.
+            if [ "${{ inputs.os }}" = "windows" ]; then
+              echo "> This is now billing at roughly \$0.3625/hour (Windows, always on-demand)."
+            elif [ "$MARKET" = "on-demand" ]; then
+              echo "> This is now billing at roughly \$0.1785/hour (Linux on-demand - spot had no capacity)."
+            else
+              echo "> This is now billing at roughly \$0.0529/hour (Linux spot; \$0.1785/hour if it falls back to on-demand)."
+            fi
+            echo "> Run **Desktop - DESTROY** when finished; your data survives."
           } >> "$GITHUB_STEP_SUMMARY"

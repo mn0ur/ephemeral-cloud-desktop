@@ -1,5 +1,6 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
 import { loadSessions, dropSession, putMachine, logEvent } from "../lib/state.js";
+import { MACHINE_OSES } from "../lib/machines.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
@@ -10,6 +11,17 @@ export default async function handler(req, res) {
   if (!username) return res.status(400).json({ error: "bad username" });
 
   const prior = (await loadSessions())[username] || {};
+
+  // Which machine was destroyed decides which record gets the tombstone, so a
+  // wrong answer here tombstones the machine that is still there and leaves
+  // the destroyed one looking alive. Silently defaulting to "linux" did
+  // exactly that for any caller that forgot the field; there is no safe
+  // guess, so an unnameable OS is a 400 - checked BEFORE anything is written.
+  const os = req.body?.os || prior.os;
+  if (!MACHINE_OSES.includes(os)) {
+    return res.status(400).json({ error: "os is required (linux or windows)" });
+  }
+
   const duration_s = prior.started_at
     ? Math.round(Date.now() / 1000 - prior.started_at)
     : null;
@@ -22,7 +34,6 @@ export default async function handler(req, res) {
   // silently rebuilt by the very next /api/status poll's sign-in-build pass
   // (real money, against explicit user intent). No instance_id/hostname
   // carried over - the machine is actually gone.
-  const os = req.body?.os || prior.os || "linux";
   await putMachine(username, os, { os, state: "deleted", deleted_at: Date.now() / 1000 });
   await logEvent("destroy", {
     username,

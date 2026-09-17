@@ -32,12 +32,25 @@ export default async function handler(req, res) {
   // value is only a fallback for a session with no prior state (redeploy
   // mid-run), same as os above.
   const region = prior.region || (REGIONS[req.body?.region] ? req.body.region : "ap-south-1");
+
+  // The MACHINE record is the durable home of the login. A sleep drops the
+  // session entirely (api/session-slept.js), so by the time a wake calls back
+  // there is no prior session to inherit a password from - which is exactly
+  // how every wake used to produce a running, billing desktop showing
+  // "Password not recorded - this desktop was recovered". The machine record
+  // survives a sleep the same way instance_id does, so the login is kept
+  // there too and is the last fallback here.
+  const machines = await loadMachines();
+  const priorMachine = machines[machineKey(username, os)] || {};
+  const password = req.body?.password || prior.password || priorMachine.password || null;
+  const loginUser = req.body?.login_user || prior.login_user || priorMachine.login_user || null;
+
   await putSession(username, {
     status: "ready", // the page polls the per-OS probe before calling it active
     email,
     url: req.body?.url || null,
-    password: req.body?.password || prior.password || null,
-    login_user: req.body?.login_user || prior.login_user || null,
+    password,
+    login_user: loginUser,
     started_at: startedAt,
     os,
     region,
@@ -58,16 +71,22 @@ export default async function handler(req, res) {
   // The machine outlives the session (Plan B). Recording it here - the one
   // place that already knows a machine exists and answers - keeps the registry
   // true for both a fresh build and a wake.
-  const machines = await loadMachines();
-  const priorMachine = machines[machineKey(username, os)] || {};
   await putMachine(username, os, {
     ...priorMachine,
     os,
     state: "running",
+    // Persisted here, not only on the session: a sleep drops the session and
+    // a wake runs no Terraform, so this record is the only thing that can
+    // still answer "what does this person log in with" afterwards.
+    password,
+    login_user: loginUser,
     instance_id: req.body?.instance_id || priorMachine.instance_id || null,
     hostname: (req.body?.url || "").replace(/^https?:\/\//, "") || priorMachine.hostname || null,
     created_at: priorMachine.created_at || Date.now() / 1000,
     last_woken_at: Date.now() / 1000,
+    // The build is over - clear the staleness marker so a record that spent a
+    // while in "building" is never mistaken for a dead build later.
+    building_since: null,
     ...(req.body?.session_token ? { lost_token_hash: hashToken(req.body.session_token) } : {}),
   });
 

@@ -120,13 +120,55 @@ jobs:
             exit 1
           fi
 
-          # The password lives on the user's data volume as a tag and does not
-          # change when a machine sleeps, so the panel already has it from the
-          # build. A wake sends no password; session-ready keeps the prior one.
+          # The password lives on the user's data volume as a DesktopPassword
+          # tag (see desktop-up.yml's "Guest-only setup" step, which creates it
+          # there) and does not change when a machine sleeps. It has to be read
+          # and sent HERE: sleeping drops the session entirely
+          # (panel/api/session-slept.js), so "the panel already has it from the
+          # build" was simply untrue - every wake produced a running, billing
+          # desktop showing "Password not recorded - this desktop was
+          # recovered", with nobody able to log in.
+          #
+          # Same filters as the build uses, so this can only ever find that
+          # user's own data volume for that OS.
+          ROLE=desktop-guest-data
+          if [ "$OS" = "windows" ]; then ROLE=desktop-guest-data-windows; fi
+          PASSWORD=""
+          VOL_ID=$(aws ec2 describe-volumes \
+            --filters "Name=tag:Owner,Values=$USER_NAME" "Name=tag:Role,Values=$ROLE" \
+            --query 'Volumes[0].VolumeId' --output text 2>/dev/null || true)
+          if [ -n "$VOL_ID" ] && [ "$VOL_ID" != "None" ]; then
+            PASSWORD=$(aws ec2 describe-tags \
+              --filters "Name=resource-id,Values=$VOL_ID" "Name=key,Values=DesktopPassword" \
+              --query 'Tags[0].Value' --output text 2>/dev/null || true)
+            if [ "$PASSWORD" = "None" ]; then PASSWORD=""; fi
+          fi
+          if [ -n "$PASSWORD" ]; then
+            # Masked BEFORE it is used anywhere: this repo is public, and the
+            # value must never be able to reach a log line or a step summary.
+            echo "::add-mask::$PASSWORD"
+            echo "read the stored password from $VOL_ID"
+          else
+            # NOT fatal. The machine is up and reachable either way, and
+            # failing the wake here would leave it running and billing with
+            # the panel never told. The panel falls back to whatever it has
+            # (session, then machine record) - see api/session-ready.js.
+            echo "::warning::no DesktopPassword tag found for $USER_NAME ($ROLE) - the panel will fall back to the password it already has, if any"
+          fi
+          # Matches terraform output "login_user": the panel username, and on
+          # Windows the same truncated to the 20-character local-account limit.
+          LOGIN_USER="$USER_NAME"
+          if [ "$OS" = "windows" ]; then LOGIN_USER=$(printf '%.20s' "$USER_NAME"); fi
+
           if [ -z "$HUB_CALLBACK_SECRET" ]; then
             echo "::error::HUB_CALLBACK_SECRET is not set - the panel cannot learn the desktop is awake."
             exit 1
           fi
+          # The password field is omitted entirely when there is none to send,
+          # rather than sent as "" - session-ready falls back only on a falsy
+          # value, and an empty string would still be a falsy value it then
+          # had to reason about. jq builds it with a real conditional so the
+          # secret never goes near a shell string that could be echoed.
           PAYLOAD=$(jq -n \
             --arg username "$USER_NAME" \
             --arg url "https://$HOST" \
@@ -134,7 +176,10 @@ jobs:
             --arg region "ap-south-1" \
             --arg instance_id "$ID" \
             --arg launched_at "$LAUNCHED_AT" \
-            '{username:$username, url:$url, os:$os, region:$region, instance_id:$instance_id, launched_at:($launched_at|tonumber), market:"on-demand", woken:true}')
+            --arg password "$PASSWORD" \
+            --arg login_user "$LOGIN_USER" \
+            '{username:$username, url:$url, os:$os, region:$region, instance_id:$instance_id, launched_at:($launched_at|tonumber), market:"on-demand", woken:true}
+             + (if $password == "" then {} else {password:$password, login_user:$login_user} end)')
           if ! curl -fsS -X POST "$PANEL_URL/api/session-ready" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \

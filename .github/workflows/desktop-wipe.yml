@@ -83,6 +83,9 @@ jobs:
 
           DELETED=0
           BLOCKED=""
+          # Set when the volume had to be detached from a STOPPED (sleeping)
+          # machine - that machine is left unbootable by the delete below.
+          WAS_SLEEPING=0
           # This job only ever touches the Linux data role. Same tag pair the
           # start workflow uses, so this can only match this user's Linux
           # desktop data volume - never the owner's, the hub's, or a root disk.
@@ -112,6 +115,12 @@ jobs:
                 aws ec2 detach-volume --region "$AWS_REGION" --volume-id "$VOL"
                 aws ec2 wait volume-available --region "$AWS_REGION" --volume-ids "$VOL"
                 STATE=available
+                # That machine is now a machine whose data disk is gone. A
+                # wake runs no Terraform, so it would boot expecting a volume
+                # that no longer exists while the panel showed it Running -
+                # the panel is told to tombstone it below, so the next Start
+                # builds a whole machine instead of waking a broken one.
+                WAS_SLEEPING=1
               fi
             fi
             # Refuse while still attached: deleting under a running desktop
@@ -141,11 +150,13 @@ jobs:
           fi
 
           if [ "$DELETED" -gt 0 ] && [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+            TOMBSTONE=false
+            if [ "$WAS_SLEEPING" -eq 1 ]; then TOMBSTONE=true; fi
             curl -fsS -X POST "$PANEL_URL/api/data-wiped" \
               -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
-              -d "{\"username\":\"$USER\",\"os\":\"linux\"}" \
-              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone"
+              -d "{\"username\":\"$USER\",\"os\":\"linux\",\"tombstone_machine\":$TOMBSTONE}" \
+              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone, and may still try to wake a machine whose data volume was just deleted"
           fi
 
           if [ -n "$BLOCKED" ]; then
@@ -216,6 +227,9 @@ jobs:
 
           DELETED=0
           BLOCKED=""
+          # Set when the volume had to be detached from a STOPPED (sleeping)
+          # machine - that machine is left unbootable by the delete below.
+          WAS_SLEEPING=0
           # This job only ever touches the Windows data role. Same tag pair the
           # start workflow uses, so this can only match this user's Windows
           # desktop data volume - never the owner's, the hub's, or a root disk.
@@ -245,6 +259,12 @@ jobs:
                 aws ec2 detach-volume --region "$AWS_REGION" --volume-id "$VOL"
                 aws ec2 wait volume-available --region "$AWS_REGION" --volume-ids "$VOL"
                 STATE=available
+                # That machine is now a machine whose data disk is gone. A
+                # wake runs no Terraform, so it would boot expecting a volume
+                # that no longer exists while the panel showed it Running -
+                # the panel is told to tombstone it below, so the next Start
+                # builds a whole machine instead of waking a broken one.
+                WAS_SLEEPING=1
               fi
             fi
             # Refuse while still attached: deleting under a running desktop
@@ -274,11 +294,13 @@ jobs:
           fi
 
           if [ "$DELETED" -gt 0 ] && [ -n "${HUB_CALLBACK_SECRET:-}" ]; then
+            TOMBSTONE=false
+            if [ "$WAS_SLEEPING" -eq 1 ]; then TOMBSTONE=true; fi
             curl -fsS -X POST "$PANEL_URL/api/data-wiped" \
               -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
-              -d "{\"username\":\"$USER\",\"os\":\"windows\"}" \
-              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone"
+              -d "{\"username\":\"$USER\",\"os\":\"windows\",\"tombstone_machine\":$TOMBSTONE}" \
+              || echo "::warning::callback failed - the panel may still offer to delete data that is already gone, and may still try to wake a machine whose data volume was just deleted"
           fi
 
           if [ -n "$BLOCKED" ]; then

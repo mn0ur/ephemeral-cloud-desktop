@@ -13,6 +13,12 @@
 export const MACHINE_OSES = ["linux", "windows"];
 
 export function machineKey(username, os) {
+  // Collision-safe only because usernameFor() in panel/lib/state.js sanitises
+  // usernames to [a-z0-9-], which strips ":" - if that character set is ever
+  // widened, a username like "alice:linux" would collide with alice's Linux
+  // machine. This file imports nothing, so it cannot enforce that itself;
+  // check state.js before loosening username rules, and check here before
+  // relying on this key format elsewhere.
   return `${username}:${os}`;
 }
 
@@ -31,6 +37,13 @@ export function startPlan(machines, username, os) {
 
   // "building" is not "ready to wake" and not "nothing there": a second
   // dispatch would build a duplicate machine, so the page waits instead.
+  //
+  // "adopt" covers two different realities: the machine is already running
+  // and reachable, or it is still being built with nothing to attach to yet.
+  // Either way there is nothing for the caller to dispatch here - it means
+  // "do not start anything, keep polling". A caller that needs to tell
+  // running from still-building apart must read the machine's own `state`
+  // field itself; this function does not distinguish them in its return.
   if (!mine) return { action: "build", sleepOs };
   if (mine.state === "sleeping") return { action: "wake", sleepOs };
   return { action: "adopt", sleepOs };

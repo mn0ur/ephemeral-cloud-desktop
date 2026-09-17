@@ -52,9 +52,13 @@ let lastPhase = null;
 // 186-189s, Linux ~325s, destroy 105-140s. The bar fills to 95% at the
 // expected time and then HOLDS with "taking longer" - it never claims 100%
 // before the real state change arrives from the poll.
-// sleep: 135s is a placeholder matching destroy's measured time, not yet
-// measured itself - Task 8 measures a real sleep and corrects it.
-const EXPECTED_S = { linux: 330, windows: 200, destroy: 135, wake_linux: 75, wake_windows: 120, sleep: 135 };
+// MEASURED on real machines, not guessed (2026-09-17, sddtest, ap-south-1):
+// a Linux wake took 101s from dispatch to the desktop answering with a valid
+// certificate, and a sleep took 49s. Windows is not measured yet - it is the
+// Linux figure plus the margin its slower boot has shown everywhere else.
+// A bar that promises less than the truth reads as a hang, so these are
+// rounded UP from the measurement.
+const EXPECTED_S = { linux: 330, windows: 200, destroy: 135, wake_linux: 105, wake_windows: 150, sleep: 60 };
 // Client-side anchor for the moment we clicked, used until the server-side
 // timestamp (dispatched_at / destroy_dispatched_at) is on the session.
 let actionStartedAt = null;

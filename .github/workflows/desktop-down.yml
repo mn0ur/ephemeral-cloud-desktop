@@ -168,7 +168,7 @@ jobs:
           curl -fsS -X POST "$PANEL_URL/api/session-ended" \
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
-            -d "{\"username\":\"${{ inputs.guest_username }}\",\"reason\":\"manual\"}" \
+            -d "{\"username\":\"${{ inputs.guest_username }}\",\"os\":\"${{ inputs.os }}\",\"reason\":\"manual\"}" \
             || echo "::warning::callback failed - non-fatal, destroy already succeeded"
 
       - name: Confirm nothing billable is left

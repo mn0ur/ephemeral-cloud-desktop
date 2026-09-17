@@ -53,3 +53,16 @@ test("missingOses: which machines a user still needs built", () => {
   // another user's machines are not this user's
   assert.deepEqual(missingOses({ "bob:linux": m("sleeping", "linux") }, "alice"), ["linux", "windows"]);
 });
+
+test("startPlan: the OS switch is a sleep then a wake, never two machines running", () => {
+  const machines = {
+    "alice:linux": { os: "linux", state: "running" },
+    "alice:windows": { os: "windows", state: "sleeping" },
+  };
+  const plan = startPlan(machines, "alice", "windows");
+  assert.equal(plan.sleepOs, "linux");
+  assert.equal(plan.action, "wake");
+  // after the sleep lands, the same call plans a plain wake
+  const after = { ...machines, "alice:linux": { os: "linux", state: "sleeping" } };
+  assert.deepEqual(startPlan(after, "alice", "windows"), { action: "wake", sleepOs: null });
+});

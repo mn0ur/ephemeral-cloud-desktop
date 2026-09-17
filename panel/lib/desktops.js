@@ -46,10 +46,18 @@ export function requestedOs(bodyOs) {
 export const NO_ACCESS_MESSAGE =
   "Your account doesn't have access to Sihaab yet. Ask the owner to add you.";
 
+// A session occupies a slot - counts against MAX_CONCURRENT, blocks a second
+// Start, blocks a wipe - from the moment something is dispatched for it until
+// it either answers or is torn down. "building" and "waking" are exactly
+// "pending" was before Task 5 split it in two (a fresh build vs. a wake of a
+// parked machine): both are still "nothing to attach to yet, don't dispatch
+// again".
+export const LIVE_STATUSES = ["pending", "building", "waking", "ready", "active"];
+
 export function startRefusalReason(session, existingSession) {
   if (!session) return "sign in first";
   if (!session.has_access) return NO_ACCESS_MESSAGE;
-  if (["pending", "ready", "active"].includes(existingSession?.status)) {
+  if (LIVE_STATUSES.includes(existingSession?.status)) {
     return "you already have a desktop running";
   }
   return null;
@@ -64,6 +72,9 @@ export function startRefusalReason(session, existingSession) {
 export function sessionPhase(s, now = Date.now() / 1000) {
   if (!s) return null;
   if (s.destroy_dispatched_at) return "destroying";
+  if (s.sleep_dispatched_at) return "sleeping";
+  if (s.status === "building") return "building";
+  if (s.status === "waking") return "waking";
   if (s.status === "error") return "error";
   if (s.status === "active") {
     return s.unreachable_since && now - s.unreachable_since >= UNREACHABLE_AFTER_S ? "unreachable" : "running";
@@ -185,7 +196,7 @@ export async function urlUp(probe, timeoutMs = 2500) {
 
 export function activeCount(sessions) {
   return Object.values(sessions).filter((s) =>
-    ["pending", "ready", "active"].includes(s.status)
+    LIVE_STATUSES.includes(s.status)
   ).length;
 }
 
@@ -206,7 +217,7 @@ export async function refreshOwn(sessions, username, store) {
     await store.putSession(username, s);
     await store.putHealth(username, { checked_at: now });
   } else if (
-    s.status === "pending" &&
+    ["pending", "building", "waking"].includes(s.status) &&
     now - (s.dispatched_at || now) > PENDING_TIMEOUT_S
   ) {
     delete sessions[username];

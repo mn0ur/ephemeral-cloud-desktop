@@ -54,6 +54,15 @@ test("sessionPhase: no session is null; pending is starting, never an existing m
   assert.equal(sessionPhase({ status: "pending", destroy_dispatched_at: 5 }), "destroying");
 });
 
+test("sessionPhase: a first build and a wake are different waits, and neither is 'running'", () => {
+  assert.equal(sessionPhase({ status: "building" }), "building");
+  assert.equal(sessionPhase({ status: "waking" }), "waking");
+  // a sleep in flight reads as destroying-style shutdown, not as running
+  assert.equal(sessionPhase({ status: "active", sleep_dispatched_at: 1 }), "sleeping");
+  // and an actual delete still wins
+  assert.equal(sessionPhase({ status: "active", destroy_dispatched_at: 1, sleep_dispatched_at: 1 }), "destroying");
+});
+
 test("canCancel: hidden for the first minute of a start, then allowed; always for a real machine", () => {
   const t0 = 1000;
   const starting = { status: "pending", dispatched_at: t0 };

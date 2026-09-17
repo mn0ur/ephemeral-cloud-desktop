@@ -1,5 +1,5 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
-import { loadSessions, dropSession, logEvent } from "../lib/state.js";
+import { loadSessions, dropSession, dropMachine, logEvent } from "../lib/state.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
@@ -15,6 +15,10 @@ export default async function handler(req, res) {
     : null;
 
   await dropSession(username);
+  // A DELETE is the only thing that removes a machine. Sleep keeps the record:
+  // that is exactly what makes the next start a ~1 minute wake.
+  const os = req.body?.os || prior.os || "linux";
+  await dropMachine(username, os);
   await logEvent("destroy", {
     username,
     email: prior.email,

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   MACHINE_OSES, machineKey, startPlan, missingOses, wipeRefusalReason, pendingWakeAction,
+  staleBuild, deleteOs, BUILD_STALE_S,
 } from "../lib/machines.js";
 
 const m = (state, os) => ({ os, state, instance_id: "i-1" });
@@ -163,4 +164,65 @@ test("Fix round 1 (Critical 1): a manual Start still rebuilds a deleted machine"
 test("Fix round 1 (Critical 1): a deleted machine does not block a wipe", () => {
   const deleted = { "alice:linux": m("deleted", "linux") };
   assert.equal(wipeRefusalReason(deleted, {}, "alice"), null);
+});
+
+test("Fix round 2 (Important 3): a build that never finished stops wedging that OS after 20 minutes", () => {
+  // A record written "building" at dispatch time and never updated (a
+  // cancelled run, a failed apply, a callback that never arrived) used to be
+  // permanent: missingOses skipped it, startPlan said "adopt" so Start did
+  // nothing, wipe was refused, and with no session there was no delete path
+  // either. Past BUILD_STALE_S it now counts as absent on both sides.
+  const now = 1_000_000;
+  const fresh = { "alice:linux": { os: "linux", state: "building", building_since: now - (BUILD_STALE_S - 1) } };
+  const stale = { "alice:linux": { os: "linux", state: "building", building_since: now - BUILD_STALE_S } };
+
+  // One second inside the window: still a live build, still left alone.
+  assert.equal(staleBuild(fresh["alice:linux"], now), false);
+  assert.deepEqual(missingOses(fresh, "alice", now), ["windows"]);
+  assert.deepEqual(startPlan(fresh, "alice", "linux", now), { action: "adopt", sleepOs: null });
+
+  // Exactly at the boundary and beyond: treated as no machine at all, so the
+  // next poll rebuilds it and the next Start builds rather than adopting.
+  assert.equal(staleBuild(stale["alice:linux"], now), true);
+  assert.deepEqual(missingOses(stale, "alice", now), ["linux", "windows"]);
+  assert.deepEqual(startPlan(stale, "alice", "linux", now), { action: "build", sleepOs: null });
+});
+
+test("Fix round 2 (Important 3): staleness falls back to created_at, and an undated record is never called stale", () => {
+  const now = 1_000_000;
+  // Records written before building_since existed still carry created_at,
+  // stamped at the same moment by every writer.
+  assert.equal(staleBuild({ state: "building", created_at: now - BUILD_STALE_S - 1 }, now), true);
+  assert.equal(staleBuild({ state: "building", created_at: now - 60 }, now), false);
+  // With no timestamp at all, an unknown age must NOT hand a possibly-live
+  // build to a second dispatch.
+  assert.equal(staleBuild({ state: "building" }, now), false);
+  assert.deepEqual(missingOses({ "alice:linux": { os: "linux", state: "building" } }, "alice", now), ["windows"]);
+  // Only "building" ages out - a parked machine is parked no matter how long.
+  assert.equal(staleBuild({ state: "sleeping", building_since: 0 }, now), false);
+  assert.equal(staleBuild({ state: "running", created_at: now - BUILD_STALE_S * 10 }, now), false);
+});
+
+test("Fix round 2 (Important 1): a delete during an OS switch targets the machine that is still running", () => {
+  // During a switch the session carries BOTH: os/wake_os is the machine being
+  // brought up, sleep_os the one still running and being stopped. Reading
+  // session.os there destroyed the WRONG machine - the user's other desktop.
+  const switching = { os: "windows", wake_os: "windows", sleep_os: "linux", status: "waking", pending_wake: true };
+  assert.equal(deleteOs(switching, undefined), "linux");
+
+  // No switch in flight: the session's own os is the machine to delete.
+  assert.equal(deleteOs({ os: "windows", status: "active" }, undefined), "windows");
+
+  // A parked machine has no session at all - the Start card names it in the
+  // body, and an explicit, validated OS always wins.
+  assert.equal(deleteOs(null, "windows"), "windows");
+  assert.equal(deleteOs(switching, "windows"), "windows");
+
+  // Nothing names an OS, or the body names nonsense: null, so the caller
+  // answers 404 rather than guessing at someone's machine.
+  assert.equal(deleteOs(null, undefined), null);
+  assert.equal(deleteOs(null, "macos"), null);
+  assert.equal(deleteOs({ status: "active" }, "../../etc"), null);
+  // A junk sleep_os is ignored rather than trusted.
+  assert.equal(deleteOs({ os: "linux", sleep_os: "macos" }, undefined), "linux");
 });

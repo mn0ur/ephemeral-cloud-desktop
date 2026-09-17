@@ -8,7 +8,7 @@ import {
   refreshOwn, activeCount, MAX_CONCURRENT, HOURLY_USD, HOURLY_USD_WINDOWS, DESKTOP_DOMAIN, REGIONS,
   sessionPhase, canCancel, hourlyRate,
 } from "../lib/desktops.js";
-import { missingOses } from "../lib/machines.js";
+import { missingOses, machineKey, MACHINE_OSES } from "../lib/machines.js";
 
 export default async function handler(req, res) {
   // Never cached: the page polls this to decide what to render, and a cached
@@ -48,11 +48,30 @@ export default async function handler(req, res) {
   // GitHub API then costs one round trip's worth of latency, not two, and it
   // costs that only on the single poll that wins each claim.
   let hasMachines = false;
-  if (session?.has_access && tokenConfigured) {
+  let myMachines = null;
+  if (session?.has_access) {
     const machines = await loadMachines();
-    hasMachines = Boolean(Object.keys(machines).some((k) => k.startsWith(session.user_id + ":")));
+    // Tombstones excluded: a user whose only records are deleted machines has
+    // nothing to wake, and telling them "Ready in about a minute" in front of
+    // a 3-minute rebuild is a lie the page then has to walk back.
+    hasMachines = MACHINE_OSES.some((os) => {
+      const mine = machines[machineKey(session.user_id, os)];
+      return Boolean(mine) && mine.state !== "deleted";
+    });
+    // The caller's OWN machines, so the Start card can list what is parked
+    // and offer to delete it. State, os and hostname only - never a password,
+    // never a token, and never another user's machine.
+    myMachines = {};
+    for (const os of MACHINE_OSES) {
+      const mine = machines[machineKey(session.user_id, os)];
+      if (!mine || mine.state === "deleted") continue;
+      myMachines[os] = { os, state: mine.state || null, hostname: mine.hostname || null };
+    }
     const own = sessions[session.user_id];
-    await Promise.allSettled(
+    // The machine payload above is pure bookkeeping and costs nothing; the
+    // sign-in BUILD needs a GitHub token, so only that half is skipped when
+    // the deployment has none.
+    if (tokenConfigured) await Promise.allSettled(
       missingOses(machines, session.user_id).map(async (os) => {
         // A manual Start (api/dispatch.js) also writes status "building" for
         // its os BEFORE any machine record exists - the record is only
@@ -90,7 +109,13 @@ export default async function handler(req, res) {
             is_guest: "false", use_spot: "false", os, region: "ap-south-1",
           });
           await putMachine(session.user_id, os, {
-            os, state: "building", created_at: Date.now() / 1000,
+            os, state: "building",
+            created_at: Date.now() / 1000,
+            // When this build started, so a build that never calls back can
+            // be recognised as dead (staleBuild in lib/machines.js) and so
+            // dispatch.js's adopt branch can anchor the "building" card on
+            // the real start time rather than on the moment Start was pressed.
+            building_since: Date.now() / 1000,
           });
         } catch (e) {
           console.error("sign-in build failed", os, e.message);
@@ -139,6 +164,8 @@ export default async function handler(req, res) {
     progress: worthProgress ? await runProgress(session.user_id, anchor, phase === "destroying" ? "DESTROY" : "START") : null,
     has_saved_data: session ? await hasSavedData(session.user_id) : false,
     has_machines: hasMachines,
+    // Only ever the caller's own, and only non-secret fields - see above.
+    machines: myMachines,
     notice: session && (!own || phase === "error") ? await getNotice(session.user_id) : null,
   };
 

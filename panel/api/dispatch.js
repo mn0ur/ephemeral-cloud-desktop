@@ -7,7 +7,7 @@ import { dispatch, WORKFLOWS, tokenConfigured } from "../lib/github.js";
 import {
   activeCount, MAX_CONCURRENT, requestedOs, requestedRegion, startRefusalReason, NO_ACCESS_MESSAGE,
 } from "../lib/desktops.js";
-import { startPlan, machineKey, wipeRefusalReason } from "../lib/machines.js";
+import { startPlan, machineKey, wipeRefusalReason, deleteOs, staleBuild } from "../lib/machines.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
@@ -88,9 +88,26 @@ export default async function handler(req, res) {
           // exist, so there is nothing to roll back.
           return res.status(e.status || 500).json({ error: e.message });
         }
+        // A switch is TWO machines: the one still running (plan.sleepOs) and
+        // the one being brought up (os). Overwriting the session with only
+        // the target OS discarded the running machine's identity - so if the
+        // sleep failed it kept billing with nothing on screen, and a delete
+        // in that window destroyed the WRONG machine (it read session.os,
+        // which by then meant the target). Both are named explicitly now:
+        // sleep_os is what is being stopped, wake_os what is being started,
+        // and deleteOs() prefers sleep_os while the switch is in flight.
+        //
+        // The prior session's identity fields (url, instance_id, started_at,
+        // lost_token_hash) are carried, but its two ACTION timestamps are
+        // not: a stale destroy_dispatched_at or sleep_dispatched_at would
+        // make sessionPhase draw this as "destroying"/"sleeping" instead of
+        // the switch that is actually happening.
+        const { destroy_dispatched_at: _d, sleep_dispatched_at: _s, ...carried } = sessions[me] || {};
         await putSession(me, {
+          ...carried,
           status: "waking", email: session.email, dispatched_at: Date.now() / 1000,
           os, region, pending_wake: true,
+          sleep_os: plan.sleepOs, wake_os: os,
         });
         return res.status(202).json({ ok: true, waiting_for: plan.sleepOs });
       }
@@ -110,6 +127,27 @@ export default async function handler(req, res) {
 
       if (plan.action === "adopt") {
         // Already building or running - the page just needs to keep polling.
+        //
+        // "Already building" needs one thing written first, though. The
+        // sign-in build (api/status.js) writes a MACHINE record and no
+        // session at all, so a user who presses Start during that build used
+        // to land here with nothing written: the page's busy overlay only
+        // clears once my_session exists, so it never cleared, and because no
+        // session ever carried start_requested, session-ready parked the very
+        // machine the user was sitting there waiting for. Write the session
+        // the sign-in build never wrote - honest "building" phase, anchored
+        // on when the build actually started, flagged as asked-for.
+        const adopted = machines[machineKey(me, os)];
+        if (adopted?.state === "building" && !staleBuild(adopted)) {
+          await putSession(me, {
+            status: "building",
+            email: session.email,
+            dispatched_at: adopted.building_since || adopted.created_at || Date.now() / 1000,
+            os,
+            region,
+            start_requested: true,
+          });
+        }
         return res.status(202).json({ ok: true, action: "adopt" });
       }
 
@@ -188,26 +226,51 @@ export default async function handler(req, res) {
     if (target !== me && !session.is_admin) {
       return res.status(403).json({ error: "not your session" });
     }
-    if (!sessions[target]) return res.status(404).json({ error: "no such session" });
-    const os = sessions[target]?.os || "linux";
+    // A PARKED machine has no session at all - that is the whole point of
+    // sleeping. Guarding this path on the session alone therefore made a
+    // parked machine undeletable: it kept costing its disk (~$4/month
+    // Windows, ~$2.50 Linux) forever with no way to remove it. The machine
+    // record is the second source of truth, and either one is enough.
+    const existingSession = sessions[target] || null;
+    const machines = await loadMachines();
+    // Body first (that is how the Start card names a parked machine), then
+    // the session - sleep_os while an OS switch is in flight, so a delete
+    // then targets the machine still running rather than the one being
+    // switched to. See deleteOs() in lib/machines.js.
+    // The || "linux" is only for a legacy session that recorded no os at all;
+    // with no session AND no body os, `os` stays null, no machine can be
+    // looked up, and the 404 below answers.
+    const os = deleteOs(existingSession, req.body?.os) || (existingSession ? "linux" : null);
+    const existing = os ? machines[machineKey(target, os)] : null;
+    const liveMachine = Boolean(existing) && existing.state !== "deleted";
+    if (!existingSession && !liveMachine) {
+      return res.status(404).json({ error: "no such machine" });
+    }
+    const region = existingSession?.region || existing?.region || "ap-south-1";
     try {
       await dispatch(workflow, {
         confirm: "DESTROY",
         guest_username: target,
         os,
-        region: sessions[target]?.region || "ap-south-1",
+        region,
       });
     } catch (e) {
       return res.status(e.status || 500).json({ error: e.message });
     }
     // Anchor for the panel's destroy progress bar. Kept on the session so a
     // reload mid-destroy still shows how far along it is; the whole entry is
-    // dropped by session-ended when the workflow finishes.
-    await putSession(target, { ...sessions[target], destroy_dispatched_at: Date.now() / 1000 });
+    // dropped by session-ended when the workflow finishes. A parked machine
+    // has no session yet, so one is written here purely to carry that anchor
+    // - it has no live status, so it occupies no MAX_CONCURRENT slot.
+    await putSession(target, {
+      ...(existingSession || {}),
+      email: existingSession?.email || (target === me ? session.email : null),
+      os,
+      region,
+      destroy_dispatched_at: Date.now() / 1000,
+    });
     // A DELETE is the only action that removes the machine record - a sleep
     // keeps it, which is what makes the next start a wake instead of a build.
-    const machines = await loadMachines();
-    const existing = machines[machineKey(target, os)];
     if (existing) {
       await putMachine(target, os, { ...existing, state: "deleting" });
     }

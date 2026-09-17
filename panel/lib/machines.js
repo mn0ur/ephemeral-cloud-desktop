@@ -28,8 +28,36 @@ export function machineKey(username, os) {
 // build in api/status.js. A manual Start must still rebuild a deleted
 // machine - that goes through startPlan below, which checks state
 // explicitly rather than relying on missingOses.
-export function missingOses(machines, username) {
-  return MACHINE_OSES.filter((os) => !machines[machineKey(username, os)]);
+export function missingOses(machines, username, now = Date.now() / 1000) {
+  return MACHINE_OSES.filter((os) => {
+    const mine = machines[machineKey(username, os)];
+    return !mine || staleBuild(mine, now);
+  });
+}
+
+// How long a record may sit in state "building" before it is treated as a
+// build that died. A build that never calls back (a cancelled run, a failed
+// terraform apply, a GitHub outage between dispatch and callback) leaves a
+// record that is neither a machine nor an absence: missingOses would never
+// rebuild it, startPlan would answer "adopt" so Start did nothing, and a wipe
+// would be refused because the record reads as live - wedging that OS for
+// that user permanently, with no session and so no delete path either.
+//
+// 20 minutes is deliberately far past the longest real build measured
+// (Linux ~5.5 min end to end, Windows ~3 min) plus GitHub queueing, so this
+// can only ever fire on a build that is genuinely not coming back.
+export const BUILD_STALE_S = 20 * 60;
+
+// A "building" record older than BUILD_STALE_S counts as ABSENT everywhere a
+// machine is looked up. Records written before building_since existed have no
+// timestamp; created_at is stamped at the same moment by every writer, so it
+// is the fallback. With neither, the record is NOT treated as stale - an
+// unknown age must not hand a live build to a second dispatch.
+export function staleBuild(machine, now = Date.now() / 1000) {
+  if (!machine || machine.state !== "building") return false;
+  const since = Number(machine.building_since ?? machine.created_at);
+  if (!Number.isFinite(since) || since <= 0) return false;
+  return now - since >= BUILD_STALE_S;
 }
 
 // What to dispatch for the OS a user is switching TO, once their other
@@ -47,8 +75,12 @@ export function pendingWakeAction(machines, username, os) {
 // What Start should do, and whether the user's OTHER machine has to be put to
 // sleep first. Only one machine per user runs at a time, so nobody can run up
 // two hourly bills at once (spec decision, 2026-09-17).
-export function startPlan(machines, username, os) {
-  const mine = machines[machineKey(username, os)];
+export function startPlan(machines, username, os, now = Date.now() / 1000) {
+  const raw = machines[machineKey(username, os)];
+  // A build that died mid-flight is not a machine - see staleBuild. Treating
+  // it as absent here is what lets the next Start rebuild it instead of
+  // answering "adopt" forever.
+  const mine = staleBuild(raw, now) ? null : raw;
   const otherOs = MACHINE_OSES.find((o) => o !== os);
   const other = machines[machineKey(username, otherOs)];
   const sleepOs = other && other.state === "running" ? otherOs : null;
@@ -105,5 +137,24 @@ export function wipeRefusalReason(machines, sessions, username) {
   if (liveMachine) {
     return "that desktop is running or still building - destroy it first, then delete the data";
   }
+  return null;
+}
+
+// Which machine a delete acts on.
+//
+// During an OS switch the session carries BOTH machines: `os`/`wake_os` is the
+// one being brought up, `sleep_os` is the one still running and being stopped.
+// A delete in that window must target the running machine, not the one the
+// user is switching to - reading session.os there destroyed the wrong desktop
+// (review finding, 2026-09-17).
+//
+// An explicit, validated OS in the request body always wins: that is how the
+// Start card deletes a PARKED machine, which has no session at all. Returns
+// null when nothing names an OS - the caller answers 404 rather than guessing.
+export function deleteOs(session, bodyOs) {
+  if (MACHINE_OSES.includes(bodyOs)) return bodyOs;
+  if (!session) return null;
+  if (MACHINE_OSES.includes(session.sleep_os)) return session.sleep_os;
+  if (MACHINE_OSES.includes(session.os)) return session.os;
   return null;
 }

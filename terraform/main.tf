@@ -35,7 +35,13 @@ locals {
   # name has to be account-unique, which IAM role and key pair names are -
   # two slots applying at once would otherwise race to create the same
   # "mnour-desktop-instance" role.
-  user_suffix = var.username == "" ? "" : "-${var.username}"
+  # Per user AND per OS. A user now has BOTH a Linux and a Windows machine
+  # (sleeping machines, 2026-09-17), and every name here has to be unique
+  # across the account: the first Windows build for a user who already had
+  # Linux died on "InvalidGroup.Duplicate: the security group
+  # ephemeral-desktop-mnuowr-access already exists". State keys and workflow
+  # concurrency were already split per OS; these names were not.
+  user_suffix = var.username == "" ? "" : "-${var.username}-${var.os}"
   name        = "${var.project}${local.user_suffix}"
   display     = "mnour-desktop${local.user_suffix}"
   data_bucket = "${var.project}-${local.account_id}-data"

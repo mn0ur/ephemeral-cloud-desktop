@@ -292,6 +292,13 @@ jobs:
           # "someone else holds the lock for 4 more seconds" should be a wait,
           # not a hard error that leaves the user staring at a failed run.
           terraform -chdir=terraform init -input=false -lock-timeout=180s -backend-config="key=$KEY"
+          # pipefail, or the pipe hides everything: GitHub runs this with
+          # `bash -e {0}` and NO pipefail, so `terraform apply | tee` reports
+          # tee's exit status. A Windows apply that died on a duplicate
+          # security group was recorded as a SUCCESSFUL step, and only the
+          # readiness wait further down caught that no machine existed
+          # (2026-09-17).
+          set -o pipefail
           if terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s -no-color 2>&1 | tee /tmp/apply.log; then
             exit 0
           fi

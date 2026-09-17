@@ -385,6 +385,32 @@ else
   echo "verified: /var/lib/containerd bound onto $PERSIST_ROOT"
 fi
 
+# ---------------------------------------------------------------------------
+# Ordering drop-ins - defence for a PLAIN REBOOT, not this bootstrap run.
+#
+# Nothing otherwise tells systemd that docker/containerd need their storage
+# mounted before they start. containerd's real storage root is NOT
+# $PERSIST_ROOT itself - it is /var/lib/containerd, a separate bind mount
+# (PERSIST_ROOT/containerd -> /var/lib/containerd, added to fstab above) with
+# its own mount unit. Requiring only $PERSIST_ROOT does not guarantee that
+# bind has been applied, so containerd could still win the race against it
+# and start against the empty root-disk directory, seeing none of its
+# containers - found for real on a machine that came back with no container
+# at all. Docker's own data-root IS a plain directory under $PERSIST_ROOT,
+# but docker also depends on containerd's state being there, so it needs
+# both paths too.
+# ---------------------------------------------------------------------------
+mkdir -p /etc/systemd/system/docker.service.d /etc/systemd/system/containerd.service.d
+cat >/etc/systemd/system/docker.service.d/persist-mount.conf <<UNIT
+[Unit]
+RequiresMountsFor=$PERSIST_ROOT /var/lib/containerd
+UNIT
+cat >/etc/systemd/system/containerd.service.d/persist-mount.conf <<UNIT
+[Unit]
+RequiresMountsFor=/var/lib/containerd
+UNIT
+systemctl daemon-reload
+
 systemctl enable containerd
 systemctl start containerd
 systemctl enable docker
@@ -589,7 +615,58 @@ if ! CF_API_TOKEN="$CF_DNS_TOKEN" caddy validate --config /etc/caddy/Caddyfile -
   exit 1
 fi
 
+# enable AFTER the unit file exists and after the daemon-reload above, so
+# this genuinely takes effect rather than enabling a stale or absent unit -
+# `disabled` was found on a real machine. This is a real assertion, not a log
+# line: every other integrity check in this file exits 1 on failure, and a
+# service that silently stayed disabled is exactly the bug being fixed here.
 systemctl enable caddy
+CADDY_ENABLE_STATE="$(systemctl is-enabled caddy 2>&1)"
+if [ "$CADDY_ENABLE_STATE" != "enabled" ]; then
+  echo "FATAL: systemctl enable caddy did not stick - is-enabled reports '$CADDY_ENABLE_STATE'."
+  echo "A reboot would come back with caddy not running and no TLS ingress."
+  exit 1
+fi
+echo "caddy enable state: $CADDY_ENABLE_STATE"
 systemctl restart caddy
+
+# ---------------------------------------------------------------------------
+# desktop-boot.service - the same defence, one level up from the mount-order
+# drop-ins above. Those only fix ordering; this fixes DRIFT: if the container
+# gets stopped or Caddy gets disabled after boot (both were found true on a
+# real machine), a later reboot still needs to bring the stack back with no
+# human re-running this script. Idempotent and non-fatal by construction -
+# `docker start` on an already-running container, or a missing one, must
+# never fail this unit.
+# ---------------------------------------------------------------------------
+cat >/usr/local/bin/desktop-boot-restore <<'BOOTRESTORE'
+#!/bin/bash
+set -u
+# Unconditionally starting webtop here overrides `--restart unless-stopped`
+# for someone who deliberately docker-stopped it for maintenance - but in
+# this architecture "sleep" stops the INSTANCE, not the container, so a
+# stopped container found at boot means something drifted, not a choice made
+# on a running machine. Accepted trade-off, not an oversight.
+docker start webtop || true
+systemctl start caddy || true
+BOOTRESTORE
+chmod 755 /usr/local/bin/desktop-boot-restore
+
+cat >/etc/systemd/system/desktop-boot.service <<UNIT
+[Unit]
+Description=Restore the desktop stack (container + Caddy) on every boot
+After=docker.service
+RequiresMountsFor=$PERSIST_ROOT
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/desktop-boot-restore
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable desktop-boot.service
 
 echo "=== bootstrap complete $(date -Is) ==="

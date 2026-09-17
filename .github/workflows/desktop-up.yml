@@ -316,6 +316,76 @@ jobs:
           echo "TF_VAR_use_spot=false" >> "$GITHUB_ENV"
           terraform -chdir=terraform apply -auto-approve -input=false -lock-timeout=180s
 
+      - name: Wait for the desktop to actually answer
+        # terraform apply only proves the EC2 instance exists - the boot
+        # script then spends another 60-120s pulling the container image and
+        # starting the web server. Since sleeping machines shipped, the panel
+        # parks a machine the moment session-ready arrives (session-ready.js
+        # dispatches sleep when nobody asked for it), so posting the callback
+        # before the desktop actually answers parks it MID-INSTALL. Proven for
+        # real: a machine's bootstrap log ended with "failed to copy: failed
+        # to send write: EOF" mid `docker pull`, and after a later wake it had
+        # no container at all and Caddy was not even enabled - permanently
+        # broken, still billing. So the callback below must not fire until
+        # this proves the desktop is actually up.
+        if: inputs.guest_username != ''
+        run: |
+          set -u
+          URL=$(terraform -chdir=terraform output -raw url)
+          HOST="${URL#https://}"
+          HOST="${HOST#http://}"
+
+          # Linux has a real health endpoint (see the Caddyfile in
+          # user-data.sh.tpl). Windows has no such thing - DCV's web client at
+          # "/" is the closest signal that the desktop is actually serving.
+          if [ "${{ inputs.os }}" = "windows" ]; then
+            CHECK_URL="https://$HOST/"
+            # A Windows first boot also preps the user's volume and is
+            # genuinely slow - this is not a stuck machine, just a long one.
+            BUDGET_SECONDS=$((12 * 60))
+          else
+            CHECK_URL="https://$HOST/healthz"
+            BUDGET_SECONDS=$((8 * 60))
+          fi
+
+          echo "polling $CHECK_URL every 10s for up to $((BUDGET_SECONDS / 60)) minutes..."
+          START_TS=$(date +%s)
+          CODE="000"
+          while true; do
+            # -k: the certificate may still be being issued in the first
+            # seconds. The `|| true` matters: a non-200 (or no response at
+            # all) makes curl return a non-zero exit alongside "000", and this
+            # step runs under bash -eo pipefail - without it, the very first
+            # failed poll would abort the loop instead of letting it retry.
+            CODE=$(curl -sk -m 10 -o /dev/null -w "%{http_code}" "$CHECK_URL" || true)
+            if [ "$CODE" = "200" ]; then
+              break
+            fi
+            NOW_TS=$(date +%s)
+            ELAPSED=$((NOW_TS - START_TS))
+            if [ "$ELAPSED" -ge "$BUDGET_SECONDS" ]; then
+              echo "::error::the desktop at $CHECK_URL never answered with HTTP 200 within $((BUDGET_SECONDS / 60)) minutes (last status: $CODE) - it is still mid-install; the panel will NOT be told this session is ready, because a machine the panel believes is ready would be parked mid-install by the sleeping-machines feature"
+              exit 1
+            fi
+            sleep 10
+          done
+          ELAPSED=$(( $(date +%s) - START_TS ))
+          echo "desktop answered with HTTP 200 after ${ELAPSED}s (certificate not yet verified - that check used -k)"
+
+          # -k was needed while a fresh certificate might still be being
+          # issued, but a 200 through -k also happens when Caddy fell back to
+          # its internal self-signed cert (DNS-01 failed, or the Let's
+          # Encrypt rate limit this repo has hit for real) - a URL the user's
+          # browser will refuse to open. Now that the loose loop above has
+          # succeeded, do ONE strict check without -k before telling the
+          # panel anything.
+          STRICT_CODE=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "$CHECK_URL" || true)
+          if [ "$STRICT_CODE" != "200" ]; then
+            echo "::error::the desktop answers over HTTPS but its certificate is not trusted (strict check without -k got status '$STRICT_CODE') - the panel will NOT be told this session is ready, because a browser would refuse to open it"
+            exit 1
+          fi
+          echo "certificate verified - desktop is genuinely ready"
+
       - name: Tell desktop.sihaab.com the guest session is ready
         # The control panel holds no AWS or Terraform credentials - by design,
         # so a compromised panel can never touch infrastructure directly. It

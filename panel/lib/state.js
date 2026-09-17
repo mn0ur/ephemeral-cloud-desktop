@@ -8,6 +8,7 @@
 // entire class of problem along with the instance.
 
 import { Redis } from "@upstash/redis";
+import { machineKey } from "./machines.js";
 
 // Vercel injects these when a KV/Upstash store is attached to the project.
 // Both naming schemes are accepted because the marketplace integration and the
@@ -46,6 +47,7 @@ const K = {
   config: "config",             // hash: guest_limit_minutes, etc.
   notices: "notices",           // hash: username -> one message for their next visit
   health: "health",             // hash: username -> {checked_at, unreachable_since}
+  machines: "machines",         // hash: "<username>:<os>" -> machine JSON
 };
 
 // -- sessions ---------------------------------------------------------------
@@ -255,4 +257,26 @@ export async function getNotice(username) {
 
 export async function clearNotice(username) {
   await requireRedis().hdel(K.notices, username);
+}
+
+// -- machines ---------------------------------------------------------------
+
+// Separate from sessions on purpose: a machine survives the session that used
+// it, and a session must never be able to delete the machine record by being
+// rewritten (that class of bug cost a Destroy in PR #32's review).
+export async function loadMachines() {
+  const raw = (await requireRedis().hgetall(K.machines)) || {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    out[k] = typeof v === "string" ? JSON.parse(v) : v;
+  }
+  return out;
+}
+
+export async function putMachine(username, os, machine) {
+  await requireRedis().hset(K.machines, { [machineKey(username, os)]: JSON.stringify(machine) });
+}
+
+export async function dropMachine(username, os) {
+  await requireRedis().hdel(K.machines, machineKey(username, os));
 }

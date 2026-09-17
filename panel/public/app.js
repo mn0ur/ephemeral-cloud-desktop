@@ -185,7 +185,11 @@ function renderMine(s) {
           : m.state === "building" ? "being set up"
           : m.state === "deleting" ? "being deleted"
           : esc(m.state || "unknown");
-        const canDelete = m.state !== "deleting";
+        // "being deleted" keeps its Delete, deliberately: if the destroy
+        // workflow failed, the record stays "deleting" forever and Start
+        // adopts it and does nothing - pressing Delete again re-dispatches
+        // the destroy, which is the user's only way out of that.
+        const canDelete = true;
         return `<div class="row machine-row">
             <span>${label} &middot; <span class="sub">${state}</span></span>
             ${canDelete ? `<button type="button" class="stop machine-del" data-os="${esc(m.os)}">Delete</button>` : ""}

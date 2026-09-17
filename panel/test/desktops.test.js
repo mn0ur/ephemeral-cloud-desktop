@@ -5,7 +5,9 @@ import {
   sessionPhase, canCancel, CANCEL_AFTER_S, runBelongsTo,
   HOURLY_USD_ONDEMAND, UNREACHABLE_AFTER_S, HEALTH_EVERY_S, healthCheckDue, applyHealth,
   hashToken, tokenMatches, startRefusalReason,
+  sessionExpired, PENDING_TIMEOUT_S,
 } from "../lib/desktops.js";
+import { BUILD_STALE_S } from "../lib/machines.js";
 
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
   assert.equal(hourlyRate("linux"), HOURLY_USD);
@@ -173,4 +175,55 @@ test("startRefusalReason: only accounts with access may start, and only one desk
   // a finished/errored session is not in the way
   assert.equal(startRefusalReason(ok, { status: "error" }), null);
   assert.equal(startRefusalReason(undefined, null), "sign in first");
+});
+
+test("Fix round 3 (NB-1): a destroy that never called back stops wedging the page forever", () => {
+  // Deleting a PARKED machine writes a session that exists only to carry
+  // destroy_dispatched_at (api/dispatch.js) - it has no status at all.
+  // sessionPhase draws "destroying" on that field alone, so if the destroy
+  // workflow died (a terraform error, a runner outage) and /api/session-ended
+  // was never called, the page rendered "Shutting down" with no Start button
+  // and no way out. Nothing in the old sweep looked at that field: it only
+  // covered pending/building/waking.
+  const now = 1_000_000;
+  const pseudo = (age) => ({ os: "windows", region: "ap-south-1", destroy_dispatched_at: now - age });
+
+  assert.equal(sessionPhase(pseudo(1)), "destroying"); // what the page draws
+  assert.equal(sessionExpired(pseudo(PENDING_TIMEOUT_S - 1), now), false);
+  assert.equal(sessionExpired(pseudo(PENDING_TIMEOUT_S), now), false); // boundary is not past it
+  assert.equal(sessionExpired(pseudo(PENDING_TIMEOUT_S + 1), now), true);
+
+  // A destroy of a RUNNING desktop wedged the same way and ages out the same
+  // way - the status underneath it does not matter.
+  assert.equal(
+    sessionExpired({ status: "active", destroy_dispatched_at: now - PENDING_TIMEOUT_S - 1 }, now),
+    true
+  );
+});
+
+test("Fix round 3 (NB-2): a building session gets the same 20 minutes the machine record does", () => {
+  // dispatch.js's adopt branch anchors the session it writes on when the
+  // BUILD started, and staleBuild keeps a record adoptable for BUILD_STALE_S.
+  // Under the old 10-minute sweep a 12-minute-old build was adopted and then
+  // deleted by the very next poll - the busy overlay never cleared, no
+  // session carried start_requested, and session-ready parked the machine the
+  // user was waiting for. The two deadlines have to be the same number.
+  const now = 1_000_000;
+  const building = (age) => ({ status: "building", os: "windows", dispatched_at: now - age });
+
+  // The window that used to sweep an adoptable build:
+  assert.equal(sessionExpired(building(12 * 60), now), false);
+  // Both sides of the real boundary:
+  assert.equal(sessionExpired(building(BUILD_STALE_S - 1), now), false);
+  assert.equal(sessionExpired(building(BUILD_STALE_S + 1), now), true);
+
+  // pending and waking keep the shorter rule - neither builds anything.
+  assert.equal(sessionExpired({ status: "pending", dispatched_at: now - PENDING_TIMEOUT_S - 1 }, now), true);
+  assert.equal(sessionExpired({ status: "waking", dispatched_at: now - PENDING_TIMEOUT_S - 1 }, now), true);
+  assert.equal(sessionExpired({ status: "waking", dispatched_at: now - PENDING_TIMEOUT_S + 1 }, now), false);
+
+  // A live desktop is never swept, however long it has been up.
+  assert.equal(sessionExpired({ status: "active", started_at: now - 86400 }, now), false);
+  assert.equal(sessionExpired({ status: "ready", dispatched_at: now - 86400 }, now), false);
+  assert.equal(sessionExpired(null, now), false);
 });

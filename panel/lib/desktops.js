@@ -1,6 +1,7 @@
 // Desktop liveness and session reconciliation.
 
 import crypto from "node:crypto";
+import { BUILD_STALE_S } from "./machines.js";
 
 export const DESKTOP_DOMAIN = process.env.DESKTOP_DOMAIN || "desktop.sihaab.com";
 export const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 5);
@@ -200,6 +201,33 @@ export async function urlUp(probe, timeoutMs = 2500) {
   }
 }
 
+// When a session has waited long enough that it is certainly never finishing,
+// and so must be swept rather than left on screen. Pulled out of refreshOwn so
+// the three different windows are visible in one place and testable without a
+// mocked store.
+//
+// destroy_dispatched_at FIRST, and regardless of status: sessionPhase() draws
+// "destroying" on that field alone, and deleting a PARKED machine writes a
+// session that exists only to carry it (api/dispatch.js) - so a destroy that
+// never called back (a terraform error, a runner outage) used to leave the
+// page rendering "Shutting down" with no Start button and no escape, forever.
+//
+// A "building" session gets the SAME 20 minutes a machine record gets before
+// it is called a dead build (BUILD_STALE_S in lib/machines.js). These two
+// deadlines must agree: dispatch.js's adopt branch anchors the session it
+// writes on when the BUILD started, so a 12-minute-old build adopted under the
+// old 10-minute rule was swept by the very next poll - which is exactly the
+// wedge that adopt branch exists to prevent. A build legitimately takes longer
+// than a start ever did (it queues behind a busy runner, it installs a whole
+// desktop); "pending" and "waking" keep the shorter rule.
+export function sessionExpired(s, now = Date.now() / 1000) {
+  if (!s) return false;
+  if (s.destroy_dispatched_at) return now - s.destroy_dispatched_at > PENDING_TIMEOUT_S;
+  if (s.status === "building") return now - (s.dispatched_at || now) > BUILD_STALE_S;
+  if (["pending", "waking"].includes(s.status)) return now - (s.dispatched_at || now) > PENDING_TIMEOUT_S;
+  return false;
+}
+
 export function activeCount(sessions) {
   return Object.values(sessions).filter((s) =>
     LIVE_STATUSES.includes(s.status)
@@ -218,16 +246,18 @@ export async function refreshOwn(sessions, username, store) {
   const s = sessions[username];
   if (!s) return sessions;
   const now = Date.now() / 1000;
+  // Checked before anything else: a session that has timed out must not be
+  // probed, aged further, or drawn - it must go, so the page falls back to the
+  // Start card the user can actually act on.
+  if (sessionExpired(s, now)) {
+    delete sessions[username];
+    await store.dropSession(username);
+    return sessions;
+  }
   if (s.status === "ready" && (await urlUp(probeUrl(s.url, s.os)))) {
     s.status = "active";
     await store.putSession(username, s);
     await store.putHealth(username, { checked_at: now });
-  } else if (
-    ["pending", "building", "waking"].includes(s.status) &&
-    now - (s.dispatched_at || now) > PENDING_TIMEOUT_S
-  ) {
-    delete sessions[username];
-    await store.dropSession(username);
   } else if (s.status === "active") {
     // Health is merged in for the page but written only to its own hash, so
     // this never overwrites the session itself (see state.js getHealth).

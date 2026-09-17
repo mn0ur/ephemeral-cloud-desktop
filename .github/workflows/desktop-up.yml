@@ -221,8 +221,10 @@ jobs:
 
           # Never the owner's persistent-stack password - that would hand
           # every guest the same credential the owner uses.
-          echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
+          # Masked before it is written anywhere, same rule as admin_password
+          # below: the mask must be in place before the value can travel.
           echo "::add-mask::$GUEST_PASSWORD"
+          echo "TF_VAR_web_password_override=$GUEST_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Per-session reclaim token
         if: inputs.guest_username != '' && inputs.os != 'windows'
@@ -330,6 +332,11 @@ jobs:
         run: |
           URL=$(terraform -chdir=terraform output -raw url)
           PASSWORD=$(terraform -chdir=terraform output -raw admin_password)
+          # Masked the instant it is read, NOT after the callback below has
+          # already used it: a mask registered late does not retroactively
+          # scrub anything a failing command echoed in between, and this repo
+          # is public. Same rule the wake workflow follows.
+          echo "::add-mask::$PASSWORD"
           INSTANCE_ID=$(terraform -chdir=terraform output -raw instance_id)
           LOGIN_USER=$(terraform -chdir=terraform output -raw login_user)
           MARKET=$(terraform -chdir=terraform output -raw market)
@@ -363,7 +370,6 @@ jobs:
             -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD"
-          echo "::add-mask::$PASSWORD"
 
       - name: Where it is, and what it costs
         env:

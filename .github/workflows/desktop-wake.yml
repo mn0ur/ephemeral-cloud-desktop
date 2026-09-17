@@ -120,6 +120,35 @@ jobs:
             exit 1
           fi
 
+          # A wake has nothing to install - unlike a first build, so the
+          # budget here is short. If the desktop does not answer within it,
+          # something is genuinely wrong and the panel must not be told this
+          # session is ready (the sleeping-machines feature parks a "ready"
+          # machine the moment nobody is asking for it).
+          CHECK_URL="https://$HOST/"
+          [ "$OS" = "linux" ] && CHECK_URL="https://$HOST/healthz"
+          WAKE_BUDGET_SECONDS=240
+          echo "polling $CHECK_URL every 10s for up to $((WAKE_BUDGET_SECONDS / 60)) minutes..."
+          WAKE_START_TS=$(date +%s)
+          WAKE_CODE="000"
+          while true; do
+            # -k: cert may still be settling. `|| true`: a non-200/no response
+            # gives curl a non-zero exit, which must not abort this loop.
+            WAKE_CODE=$(curl -sk -m 10 -o /dev/null -w "%{http_code}" "$CHECK_URL" || true)
+            if [ "$WAKE_CODE" = "200" ]; then
+              break
+            fi
+            WAKE_NOW_TS=$(date +%s)
+            WAKE_ELAPSED=$((WAKE_NOW_TS - WAKE_START_TS))
+            if [ "$WAKE_ELAPSED" -ge "$WAKE_BUDGET_SECONDS" ]; then
+              echo "::error::the desktop at $CHECK_URL never answered with HTTP 200 within $((WAKE_BUDGET_SECONDS / 60)) minutes of waking (last status: $WAKE_CODE) - a wake has nothing to install, so this means something is wrong; the panel will NOT be told this session is ready"
+              exit 1
+            fi
+            sleep 10
+          done
+          WAKE_ELAPSED=$(( $(date +%s) - WAKE_START_TS ))
+          echo "desktop answered with HTTP 200 ${WAKE_ELAPSED}s after waking"
+
           # The password lives on the user's data volume as a DesktopPassword
           # tag (see desktop-up.yml's "Guest-only setup" step, which creates it
           # there) and does not change when a machine sleeps. It has to be read

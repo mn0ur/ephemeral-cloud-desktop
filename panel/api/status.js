@@ -47,8 +47,10 @@ export default async function handler(req, res) {
   // together with Promise.allSettled rather than one after another - a slow
   // GitHub API then costs one round trip's worth of latency, not two, and it
   // costs that only on the single poll that wins each claim.
+  let hasMachines = false;
   if (session?.has_access && tokenConfigured) {
     const machines = await loadMachines();
+    hasMachines = Boolean(Object.keys(machines).some((k) => k.startsWith(session.user_id + ":")));
     const own = sessions[session.user_id];
     await Promise.allSettled(
       missingOses(machines, session.user_id).map(async (os) => {
@@ -136,6 +138,7 @@ export default async function handler(req, res) {
     // few seconds forever would burn rate limit for no reason.
     progress: worthProgress ? await runProgress(session.user_id, anchor, phase === "destroying" ? "DESTROY" : "START") : null,
     has_saved_data: session ? await hasSavedData(session.user_id) : false,
+    has_machines: hasMachines,
     notice: session && (!own || phase === "error") ? await getNotice(session.user_id) : null,
   };
 

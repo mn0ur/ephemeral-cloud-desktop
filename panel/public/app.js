@@ -52,7 +52,7 @@ let lastPhase = null;
 // 186-189s, Linux ~325s, destroy 105-140s. The bar fills to 95% at the
 // expected time and then HOLDS with "taking longer" - it never claims 100%
 // before the real state change arrives from the poll.
-const EXPECTED_S = { linux: 330, windows: 200, destroy: 135 };
+const EXPECTED_S = { linux: 330, windows: 200, destroy: 135, wake_linux: 75, wake_windows: 120 };
 // Client-side anchor for the moment we clicked, used until the server-side
 // timestamp (dispatched_at / destroy_dispatched_at) is on the session.
 let actionStartedAt = null;
@@ -75,7 +75,10 @@ function tickBars() {
     el.querySelector(".bar-fill").style.width = pct + "%";
     const left = Math.ceil((total - elapsed) / 60);
     const kind = el.dataset.bar;
-    const verb = kind === "destroy" ? "Shutting down" : "Setting up";
+    const verb = kind === "destroy" ? "Shutting down"
+      : kind === "sleep" ? "Putting to sleep"
+      : kind.startsWith("wake_") ? "Waking"
+      : "Setting up";
     el.querySelector(".bar-label").textContent = elapsed >= total
       ? `${verb} — taking a little longer than usual`
       : `${verb} — usually about ${Math.round(total / 60)} min`;
@@ -115,13 +118,17 @@ function renderMine(s) {
   // Start button over "Starting..."/"Destroying...", so every action looks
   // ignored - and a destroy gets clicked repeatedly.
   if (busy) {
+    const isShutdown = pendingAction === "destroy" || pendingAction === "delete";
+    const isSleep = pendingAction === "sleep";
     box.innerHTML =
-      `<div class="status"><span class="dot work"></span> ${pendingAction === "destroy" ? "Shutting down your desktop&hellip;" : "Starting your desktop&hellip;"}</div>` +
-      `<div class="sub">${pendingAction === "destroy"
+      `<div class="status"><span class="dot work"></span> ${isShutdown ? "Shutting down your desktop&hellip;" : isSleep ? "Putting your desktop to sleep&hellip;" : "Starting your desktop&hellip;"}</div>` +
+      `<div class="sub">${isShutdown
         ? "Terminating the instance. Your files are kept."
+        : isSleep
+        ? "Everything on it is kept. Starting it again takes about a minute."
         : "We're creating a fresh machine for you."}</div>` +
-      barHtml(pendingAction === "destroy" ? "destroy" : ($("os")?.value || s.my_session?.os || "linux"),
-        (pendingAction === "destroy" ? s.my_session?.destroy_dispatched_at : s.my_session?.dispatched_at) || actionStartedAt) +
+      barHtml(isShutdown || isSleep ? "destroy" : ($("os")?.value || s.my_session?.os || "linux"),
+        (isShutdown ? s.my_session?.destroy_dispatched_at : isSleep ? s.my_session?.sleep_dispatched_at : s.my_session?.dispatched_at) || actionStartedAt) +
       stepsHtml(s.progress);
     tickBars();
     return;
@@ -157,10 +164,17 @@ function renderMine(s) {
     // e.g. "AWS took back your last desktop" (api/session-lost.js). Cleared
     // server-side on the next Start.
     const noticeBlock = s.notice ? `<div class="steps"><div class="sub">${esc(s.notice)}</div></div>` : "";
+    // A machine that is asleep has no session at all, so this Start card is
+    // exactly what a user with parked machines sees - the sub-text must say
+    // so, not imply a from-scratch build that no longer happens.
+    const startSub = s.has_machines
+      ? '<div class="sub">Ready in about a minute.</div>'
+      : '<div class="sub">Setting up your first desktop takes about 3 minutes.</div>';
     box.innerHTML = `
       ${noticeBlock}
       ${osSelect}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
+      ${startSub}
       ${dataBlock}`;
     $("start").onclick = () => go("start");
     if ($("wipe")) $("wipe").onclick = wipeData;
@@ -211,6 +225,33 @@ function renderMine(s) {
     return;
   }
 
+  if (phase === "building") {
+    box.innerHTML =
+      `<div class="status"><span class="dot work"></span> Setting up your ${osLabel} desktop for the first time&hellip;</div>` +
+      '<div class="sub">This happens once. After this, starting it takes about a minute.</div>' +
+      barHtml(isWin ? "windows" : "linux", mine.dispatched_at) + stepsHtml(s.progress);
+    tickBars();
+    return;
+  }
+
+  if (phase === "waking") {
+    box.innerHTML =
+      `<div class="status"><span class="dot work"></span> Waking your ${osLabel} desktop&hellip;</div>` +
+      '<div class="sub">Your files, apps and settings are exactly as you left them.</div>' +
+      barHtml(isWin ? "wake_windows" : "wake_linux", mine.dispatched_at) + stepsHtml(s.progress);
+    tickBars();
+    return;
+  }
+
+  if (phase === "sleeping") {
+    box.innerHTML =
+      `<div class="status"><span class="dot work"></span> Putting your ${osLabel} desktop to sleep&hellip;</div>` +
+      '<div class="sub">Everything on it is kept. Starting it again takes about a minute.</div>' +
+      barHtml("destroy", mine.sleep_dispatched_at);
+    tickBars();
+    return;
+  }
+
   // booting (machine exists, not answering yet) or running
   const running = phase === "running";
   let html = `<div class="status"><span class="dot ${running ? "up" : "work"}"></span> ${running ? "Running" : "Almost ready&hellip;"} &middot; ${osLabel}`;
@@ -247,11 +288,14 @@ function renderMine(s) {
   // Open only once it actually answers - opening while it boots lands on an
   // error page and reads as broken.
   if (running && mine.url) html += `<a class="open" href="${esc(openUrl)}" target="_blank" rel="noopener">Open desktop &rarr;</a>`;
-  html += '<div class="row"><button id="destroy" class="stop">Destroy</button></div>';
+  html += '<div class="row"><button id="sleep" class="stop">End session</button></div>';
+  html += '<div class="steps"><div class="sub">Ending a session keeps everything installed. ' +
+    '<a href="#" id="delete">Delete this machine</a> to start over from a clean one.</div></div>';
   if (!running) html += stepsHtml(s.progress);
   box.innerHTML = html;
   tickBars();
-  if ($("destroy")) $("destroy").onclick = () => go("destroy");
+  if ($("sleep")) $("sleep").onclick = () => go("sleep");
+  if ($("delete")) $("delete").onclick = (e) => { e.preventDefault(); go("delete"); };
   box.querySelectorAll(".copy-btn").forEach((btn) => (btn.onclick = () => copyToClipboard(btn)));
 }
 
@@ -291,6 +335,12 @@ async function go(action) {
   if (action === "destroy" && !confirm(lastPhase === "starting"
     ? "Cancel starting your desktop? The machine being created will be removed."
     : "Destroy your desktop? Your files are kept.")) return;
+  if (action === "delete" && !confirm(
+    "Delete this machine?\n\nAnything you installed on it is lost. Your saved files are kept, and a new machine is built next time you start (about 3 minutes)."
+  )) return;
+  if (action === "sleep" && !confirm(
+    "End this session?\n\nEverything stays exactly as it is. Starting again takes about a minute."
+  )) return;
   $("err").textContent = "";
   busy = true; pendingAction = action; actionStartedAt = Date.now() / 1000;
   startedByMe = action === "start"; // a cancel must not auto-open the machine it cancels
@@ -363,7 +413,7 @@ async function poll() {
     if (busy && pendingAction === "start" && s.my_session && s.my_session.status !== "error") {
       busy = false; pendingAction = null;
     }
-    if (busy && pendingAction === "destroy" && !s.my_session) { busy = false; pendingAction = null; }
+    if (busy && ["destroy", "delete", "sleep"].includes(pendingAction) && !s.my_session) { busy = false; pendingAction = null; }
 
     // Auto-open is separate from clearing busy above, and fires exactly once
     // per session becoming active - tracked on the session object itself so

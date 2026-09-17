@@ -39,6 +39,21 @@ export function requestedOs(bodyOs) {
   return bodyOs === "windows" ? "windows" : "linux";
 }
 
+// Guests were removed on 2026-09-17: only an admin or a permanent user may
+// start a desktop. The client hides the button, but this is the enforcement
+// point - the client is only a hint, same rule as os and region.
+export const NO_ACCESS_MESSAGE =
+  "Your account doesn't have access to Sihaab yet. Ask the owner to add you.";
+
+export function startRefusalReason(session, existingSession) {
+  if (!session) return "sign in first";
+  if (!session.has_access) return NO_ACCESS_MESSAGE;
+  if (["pending", "ready", "active"].includes(existingSession?.status)) {
+    return "you already have a desktop running";
+  }
+  return null;
+}
+
 // What the user's session IS, from their point of view. Derived on the server
 // so the page never has to guess from raw fields - it guessed wrong: a
 // just-dispatched start (status "pending", no password yet) was drawn as an

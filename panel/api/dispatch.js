@@ -3,7 +3,7 @@ import {
   loadSessions, putSession, dropSession, setHasData, hasSavedData, logEvent, clearNotice,
 } from "../lib/state.js";
 import { dispatch, WORKFLOWS, tokenConfigured } from "../lib/github.js";
-import { activeCount, MAX_CONCURRENT, requestedOs, requestedRegion } from "../lib/desktops.js";
+import { activeCount, MAX_CONCURRENT, requestedOs, requestedRegion, startRefusalReason, NO_ACCESS_MESSAGE } from "../lib/desktops.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
@@ -31,8 +31,9 @@ export default async function handler(req, res) {
         error: "this deployment has no GitHub token, so it cannot start desktops yet",
       });
     }
-    if (live.includes(sessions[me]?.status)) {
-      return res.status(409).json({ error: "you already have a desktop running" });
+    const refusal = startRefusalReason(session, sessions[me]);
+    if (refusal) {
+      return res.status(refusal === NO_ACCESS_MESSAGE ? 403 : 409).json({ error: refusal });
     }
     if (activeCount(sessions) >= MAX_CONCURRENT) {
       // Deliberately generic - the exact ceiling is not something a user needs
@@ -40,10 +41,8 @@ export default async function handler(req, res) {
       return res.status(503).json({ error: "all desktops are busy right now - try again shortly" });
     }
 
-    // A guest cannot forge "persist: true" in the request body - the
-    // client only shows the checkbox when can_persist is true, but the
-    // server is the actual enforcement point.
-    const persist = session.can_persist && Boolean(req.body?.persist);
+    // Everyone who can start is a permanent user: files are always kept.
+    const persist = true;
     // Every tier chooses Linux or Windows at Start (see requestedOs).
     const os = requestedOs(req.body?.os);
     // Same shape as os: admin-only, and this line is the actual enforcement -
@@ -53,7 +52,6 @@ export default async function handler(req, res) {
       status: "pending",
       email: session.email,
       dispatched_at: Date.now() / 1000,
-      is_guest: !session.can_persist,
       os,
       region,
     });
@@ -66,7 +64,7 @@ export default async function handler(req, res) {
         guest_username: me,
         owner_email: session.email,
         persist: persist ? "true" : "false",
-        is_guest: session.can_persist ? "false" : "true",
+        is_guest: "false",
         os,
         region,
       });

@@ -4,7 +4,7 @@ import {
   hourlyRate, requestedOs, probeUrl, HOURLY_USD, HOURLY_USD_WINDOWS, requestedRegion, REGIONS,
   sessionPhase, canCancel, CANCEL_AFTER_S, runBelongsTo,
   HOURLY_USD_ONDEMAND, UNREACHABLE_AFTER_S, HEALTH_EVERY_S, healthCheckDue, applyHealth,
-  hashToken, tokenMatches,
+  hashToken, tokenMatches, startRefusalReason,
 } from "../lib/desktops.js";
 
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
@@ -129,4 +129,22 @@ test("tokenMatches: only the exact per-session token proves a reclaim notice", (
   assert.equal(tokenMatches(undefined, h), false);
   assert.equal(tokenMatches("a".repeat(48), undefined), false);
   assert.notEqual(h, "a".repeat(48)); // stored hashed, never raw
+});
+
+test("startRefusalReason: only accounts with access may start, and only one desktop each", () => {
+  const ok = { has_access: true, is_admin: false };
+  assert.equal(startRefusalReason(ok, null), null);
+  assert.equal(
+    startRefusalReason({ has_access: false, is_admin: false }, null),
+    "Your account doesn't have access to Sihaab yet. Ask the owner to add you."
+  );
+  // an admin always has access
+  assert.equal(startRefusalReason({ has_access: true, is_admin: true }, null), null);
+  // already running or starting: one desktop per person
+  for (const status of ["pending", "ready", "active"]) {
+    assert.equal(startRefusalReason(ok, { status }), "you already have a desktop running");
+  }
+  // a finished/errored session is not in the way
+  assert.equal(startRefusalReason(ok, { status: "error" }), null);
+  assert.equal(startRefusalReason(undefined, null), "sign in first");
 });

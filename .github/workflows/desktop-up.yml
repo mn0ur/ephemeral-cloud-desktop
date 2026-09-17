@@ -60,9 +60,9 @@ on:
         type: boolean
         default: false
       use_spot:
-        description: "Linux only - Windows is always on-demand (terraform local.spot). Spot is ~2.5x cheaper for Linux but can have no capacity; the apply then retries on-demand by itself. Set false to skip spot entirely."
+        description: "Spot cannot be stopped and resumed, only terminated - and every machine this panel builds is parked when unused. Default false. true is for a throwaway machine that will never sleep."
         type: boolean
-        default: true
+        default: false
       os:
         description: "linux (default) or windows. Windows boots the baked Server 2025 + DCV image on instance_type_windows, always behind a Cloudflare-proxied hostname, with the user's NTFS volume as D:. Offered to every tier from the panel."
         type: choice
@@ -82,11 +82,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Per-username, not global: two different guests must never queue behind
-  # each other, and neither may race a second apply targeting the SAME
-  # username. Empty username -> "desktop-lifecycle-", the owner's own group,
-  # unchanged from before this section existed.
-  group: desktop-lifecycle-${{ inputs.guest_username }}
+  # Per username AND OS: a user's Windows and Linux machines are independent,
+  # so a Windows start must not queue behind a Linux one. Two runs for the SAME
+  # machine still serialise, which is what protects the state lock.
+  group: desktop-lifecycle-${{ inputs.guest_username }}-${{ inputs.os }}
   cancel-in-progress: false
 
 jobs:
@@ -247,7 +246,8 @@ jobs:
           # can be running. The reaper is in its own group but its job times out
           # at 30 min, so a lock older than an hour belongs to no live run.
           set -uo pipefail
-          KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+          # Per user AND per OS: a user has one Linux and one Windows machine, and one OS's apply must never overwrite the other's state.
+          KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.os }}/terraform.tfstate"
           BUCKET=ephemeral-desktop-643902831477-tfstate
           LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
           CREATED=$(echo "$LOCK" | jq -r '.Created // empty' 2>/dev/null || true)
@@ -282,7 +282,8 @@ jobs:
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
-            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+            # Per user AND per OS: a user has one Linux and one Windows machine, and one OS's apply must never overwrite the other's state.
+            KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.os }}/terraform.tfstate"
           fi
           # -lock-timeout instead of failing instantly: the reaper, a manual
           # destroy and this apply can all target one username's state, and

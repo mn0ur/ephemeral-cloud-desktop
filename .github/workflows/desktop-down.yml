@@ -33,10 +33,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Must match the formula in desktop-up.yml exactly, or a destroy could
-  # race a start for the SAME username while a different username runs
-  # in parallel undisturbed.
-  group: desktop-lifecycle-${{ inputs.guest_username }}
+  # Per username AND OS: a user's Windows and Linux machines are independent,
+  # so a Windows start must not queue behind a Linux one. Two runs for the SAME
+  # machine still serialise, which is what protects the state lock.
+  group: desktop-lifecycle-${{ inputs.guest_username }}-${{ inputs.os }}
   cancel-in-progress: false
 
 jobs:
@@ -117,7 +117,8 @@ jobs:
           # can be running. The reaper is in its own group but its job times out
           # at 30 min, so a lock older than an hour belongs to no live run.
           set -uo pipefail
-          KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+          # Per user AND per OS: a user has one Linux and one Windows machine, and one OS's apply must never overwrite the other's state.
+          KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.os }}/terraform.tfstate"
           BUCKET=ephemeral-desktop-643902831477-tfstate
           LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
           CREATED=$(echo "$LOCK" | jq -r '.Created // empty' 2>/dev/null || true)
@@ -146,7 +147,8 @@ jobs:
             # Must match the KEY rule in desktop-up.yml exactly, or this
             # destroy targets an empty state instead of the one the session
             # actually applied.
-            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
+            # Per user AND per OS: a user has one Linux and one Windows machine, and one OS's apply must never overwrite the other's state.
+            KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.os }}/terraform.tfstate"
           fi
           # See desktop-up.yml: lock contention with the reaper or a racing
           # apply should be a short wait, not an immediate failure.

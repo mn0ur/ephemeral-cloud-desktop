@@ -118,7 +118,7 @@ function renderMine(s) {
     box.innerHTML =
       `<div class="status"><span class="dot work"></span> ${pendingAction === "destroy" ? "Shutting down your desktop&hellip;" : "Starting your desktop&hellip;"}</div>` +
       `<div class="sub">${pendingAction === "destroy"
-        ? "Terminating the instance. Your files are kept if you chose to keep them."
+        ? "Terminating the instance. Your files are kept."
         : "We're creating a fresh machine for you."}</div>` +
       barHtml(pendingAction === "destroy" ? "destroy" : ($("os")?.value || s.my_session?.os || "linux"),
         (pendingAction === "destroy" ? s.my_session?.destroy_dispatched_at : s.my_session?.dispatched_at) || actionStartedAt) +
@@ -194,7 +194,7 @@ function renderMine(s) {
   if (phase === "destroying") {
     box.innerHTML =
       `<div class="status"><span class="dot work"></span> Shutting down your ${osLabel} desktop&hellip;</div>` +
-      '<div class="sub">Your files are kept if you chose to keep them.</div>' +
+      '<div class="sub">Your files are kept.</div>' +
       barHtml("destroy", mine.destroy_dispatched_at) + stepsHtml(s.progress);
     tickBars();
     return;
@@ -294,7 +294,7 @@ async function go(action) {
   }
   if (action === "destroy" && !confirm(lastPhase === "starting"
     ? "Cancel starting your desktop? The machine being created will be removed."
-    : "Destroy your desktop? Your files survive only if you chose to keep them.")) return;
+    : "Destroy your desktop? Your files are kept.")) return;
   $("err").textContent = "";
   busy = true; pendingAction = action; actionStartedAt = Date.now() / 1000;
   startedByMe = action === "start"; // a cancel must not auto-open the machine it cancels

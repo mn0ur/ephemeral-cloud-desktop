@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       is_guest:
-        description: "True if this session is a guest (no persist option, subject to the reaper's time limit). Set by the panel; false for anything dispatched by hand."
+        description: "Legacy: guests were removed 2026-09-17 and the panel always sends false. Kept so an old dispatch by hand still validates; true only adds the Role=guest-desktop tag."
         type: boolean
         default: false
       gpu:

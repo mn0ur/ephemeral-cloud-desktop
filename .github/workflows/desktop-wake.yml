@@ -124,10 +124,10 @@ jobs:
           # tag (see desktop-up.yml's "Guest-only setup" step, which creates it
           # there) and does not change when a machine sleeps. It has to be read
           # and sent HERE: sleeping drops the session entirely
-          # (panel/api/session-slept.js), so "the panel already has it from the
-          # build" was simply untrue - every wake produced a running, billing
-          # desktop showing "Password not recorded - this desktop was
-          # recovered", with nobody able to log in.
+          # (panel/api/session-ended.js's reason:"slept" path), so "the panel
+          # already has it from the build" was simply untrue - every wake
+          # produced a running, billing desktop showing "Password not
+          # recorded - this desktop was recovered", with nobody able to log in.
           #
           # Same filters as the build uses, so this can only ever find that
           # user's own data volume for that OS.

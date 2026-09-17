@@ -34,9 +34,10 @@ export default async function handler(req, res) {
   const region = prior.region || (REGIONS[req.body?.region] ? req.body.region : "ap-south-1");
 
   // The MACHINE record is the durable home of the login. A sleep drops the
-  // session entirely (api/session-slept.js), so by the time a wake calls back
-  // there is no prior session to inherit a password from - which is exactly
-  // how every wake used to produce a running, billing desktop showing
+  // session entirely (api/session-ended.js's reason:"slept" path), so by the
+  // time a wake calls back there is no prior session to inherit a password
+  // from - which is exactly how every wake used to produce a running,
+  // billing desktop showing
   // "Password not recorded - this desktop was recovered". The machine record
   // survives a sleep the same way instance_id does, so the login is kept
   // there too and is the last fallback here.
@@ -94,8 +95,8 @@ export default async function handler(req, res) {
   // $0.36/hour for a machine they have not opened. This only fires for a
   // sign-in build (prior.status was "building" or there was no session at
   // all) that nobody flagged start_requested - a manual Start (dispatch.js)
-  // and an OS-switch build (session-slept.js) both set that flag, so a
-  // machine the user actually asked for stays running.
+  // and an OS-switch build (session-ended.js's reason:"slept" path) both set
+  // that flag, so a machine the user actually asked for stays running.
   if ((!prior.status || prior.status === "building") && !prior.start_requested) {
     try {
       await dispatch(WORKFLOWS.sleep, { guest_username: username, os });

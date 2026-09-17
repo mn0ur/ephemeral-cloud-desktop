@@ -119,9 +119,13 @@ jobs:
           bash scripts/set-dns.sh "$HOST" 192.0.2.1 "$CF_ZONE" false || echo "::warning::DNS park failed for $HOST"
 
           if [ -n "$HUB_CALLBACK_SECRET" ]; then
-            curl -fsS -X POST "$PANEL_URL/api/session-slept" \
+            # session-slept.js was folded into session-ended.js (the Hobby
+            # plan's 12-function cap, hit 2026-09-17) - "slept" is now just
+            # one of session-ended's `reason` values. Fires only here, once
+            # the stop above is confirmed.
+            curl -fsS -X POST "$PANEL_URL/api/session-ended" \
               -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
               -H "Content-Type: application/json" \
-              -d "{\"username\":\"$USER_NAME\",\"os\":\"$OS\"}" \
+              -d "{\"username\":\"$USER_NAME\",\"os\":\"$OS\",\"reason\":\"slept\"}" \
               || echo "::warning::callback failed - the machine IS stopped; the panel will catch up on its next probe"
           fi

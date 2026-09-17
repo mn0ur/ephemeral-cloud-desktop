@@ -61,12 +61,13 @@ export function staleBuild(machine, now = Date.now() / 1000) {
 }
 
 // What to dispatch for the OS a user is switching TO, once their other
-// machine has actually stopped (api/session-slept.js). A switch is
-// "sleep the running one, then bring up the one asked for" - and "bring up"
-// means build when that OS has no LIVE machine yet (no record at all, or a
-// "deleted" tombstone), wake when a real one exists (parked or otherwise;
-// session-slept only ever reaches this once the OTHER os has just been
-// confirmed asleep, so `os` itself cannot be the one that just stopped).
+// machine has actually stopped (api/session-ended.js's reason:"slept" path).
+// A switch is "sleep the running one, then bring up the one asked for" - and
+// "bring up" means build when that OS has no LIVE machine yet (no record at
+// all, or a "deleted" tombstone), wake when a real one exists (parked or
+// otherwise; the reason:"slept" handler only ever reaches this once the
+// OTHER os has just been confirmed asleep, so `os` itself cannot be the one
+// that just stopped).
 export function pendingWakeAction(machines, username, os) {
   const mine = machines[machineKey(username, os)];
   return mine && mine.state !== "deleted" ? "wake" : "build";

@@ -117,8 +117,9 @@ test("pendingWakeAction: the controller-ruling gap - a switch to an OS the user 
   );
   // ...and wake when a machine record already exists for it, parked or not -
   // pendingWakeAction does not need to distinguish sleeping from running
-  // here, because session-slept only calls it for the OS the switch is going
-  // TO, which by construction is never the one that just stopped.
+  // here, because session-ended's reason:"slept" path only calls it for the
+  // OS the switch is going TO, which by construction is never the one that
+  // just stopped.
   assert.equal(
     pendingWakeAction({ "alice:windows": m("sleeping", "windows") }, "alice", "windows"),
     "wake"

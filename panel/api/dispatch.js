@@ -77,9 +77,9 @@ export default async function handler(req, res) {
       const plan = startPlan(machines, me, os);
 
       // Only one machine per user runs at a time. Sleep the other one first
-      // and remember what to wake when it reports back (api/session-slept
-      // dispatches the wake), so the two workflows never have to coordinate
-      // with each other.
+      // and remember what to wake when it reports back (api/session-ended's
+      // reason:"slept" path dispatches the wake), so the two workflows never
+      // have to coordinate with each other.
       if (plan.sleepOs) {
         try {
           await dispatch(WORKFLOWS.sleep, { guest_username: me, os: plan.sleepOs });

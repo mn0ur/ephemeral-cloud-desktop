@@ -145,12 +145,13 @@ export const REGIONS = {
   // seen in August and again 2026-09-12). Re-add once a launch there works.
 };
 
-// Same shape as requestedOs: admin-only, server is the actual enforcement
-// point, the client selector is only a hint.
-export function requestedRegion(isAdmin, bodyRegion) {
-  return isAdmin === true && Object.prototype.hasOwnProperty.call(REGIONS, bodyRegion)
-    ? bodyRegion
-    : "ap-south-1";
+// One region: India (ap-south-1). UAE was removed 2026-09-13 (AWS throttles
+// every launch there for this account) and the owner confirmed 2026-09-17
+// that this app uses India only. Kept as a function, not a constant, because
+// the session records the region it ran in and a second region would return
+// here rather than in every caller.
+export function requestedRegion(bodyRegion) {
+  return Object.prototype.hasOwnProperty.call(REGIONS, bodyRegion) ? bodyRegion : "ap-south-1";
 }
 
 // What "the desktop answers" means per OS. Linux: Caddy serves /healthz.

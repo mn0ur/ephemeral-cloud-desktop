@@ -73,15 +73,12 @@ jobs:
         with:
           terraform_version: 1.15.7
 
+      # One region, one zone: ap-south-1c (cheapest measured zone, and the
+      # only region this app uses since 2026-09-17).
       - name: Map region to its AZ suffix
         run: |
-          case "${{ inputs.region }}" in
-            ap-south-1) SUFFIX=c ;;
-            me-central-1) SUFFIX=a ;;
-            *) echo "::error::unknown region ${{ inputs.region }} - no AZ suffix mapping"; exit 1 ;;
-          esac
-          echo "AZ_SUFFIX=$SUFFIX" >> "$GITHUB_ENV"
-          echo "AWS_AZ=${{ inputs.region }}$SUFFIX" >> "$GITHUB_ENV"
+          echo "AZ_SUFFIX=c" >> "$GITHUB_ENV"
+          echo "AWS_AZ=ap-south-1c" >> "$GITHUB_ENV"
 
       - name: Prepare provider cache dir
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -122,9 +119,6 @@ jobs:
           # at 30 min, so a lock older than an hour belongs to no live run.
           set -uo pipefail
           KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
-          if [ "${{ inputs.region }}" != "ap-south-1" ]; then
-            KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
-          fi
           BUCKET=ephemeral-desktop-643902831477-tfstate
           LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
           CREATED=$(echo "$LOCK" | jq -r '.Created // empty' 2>/dev/null || true)
@@ -150,13 +144,10 @@ jobs:
         run: |
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
-            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
             # Must match the KEY rule in desktop-up.yml exactly, or this
             # destroy targets an empty state instead of the one the session
             # actually applied.
-            if [ "${{ inputs.region }}" != "ap-south-1" ]; then
-              KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
-            fi
+            KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
           fi
           # See desktop-up.yml: lock contention with the reaper or a racing
           # apply should be a short wait, not an immediate failure.

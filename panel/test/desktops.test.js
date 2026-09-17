@@ -22,11 +22,10 @@ test("requestedOs: every tier may choose windows; anything else is linux", () =>
   assert.equal(requestedOs({ os: "windows" }), "linux");
 });
 
-test("requestedRegion: only an admin asking for a known region gets it, else the default", () => {
-  assert.equal(requestedRegion(true, "ap-south-1"), "ap-south-1");
-  assert.equal(requestedRegion(true, "eu-west-1"), "ap-south-1"); // unknown region
-  assert.equal(requestedRegion(true, "me-central-1"), "ap-south-1"); // not offered any more
-  assert.equal(requestedRegion(true, undefined), "ap-south-1");
+test("requestedRegion: ap-south-1 is the only region, whatever is asked for", () => {
+  assert.equal(requestedRegion("ap-south-1"), "ap-south-1");
+  assert.equal(requestedRegion("me-central-1"), "ap-south-1");
+  assert.equal(requestedRegion(undefined), "ap-south-1");
   assert.deepEqual(Object.keys(REGIONS), ["ap-south-1"]);
 });
 

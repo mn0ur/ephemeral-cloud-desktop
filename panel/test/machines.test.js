@@ -131,4 +131,36 @@ test("pendingWakeAction: the controller-ruling gap - a switch to an OS the user 
     pendingWakeAction({ "bob:windows": m("running", "windows") }, "alice", "windows"),
     "build"
   );
+  // A deleted machine is not "there" for a switch either - build it fresh.
+  assert.equal(pendingWakeAction({ "alice:windows": m("deleted", "windows") }, "alice", "windows"), "build");
+});
+
+test("Fix round 1 (Critical 1): a deleted machine is a tombstone, not a gap - missingOses must not auto-rebuild it", () => {
+  // api/session-ended.js now writes {state: "deleted"} instead of dropping
+  // the record outright. missingOses() must treat that record as NOT
+  // missing, or the very next /api/status poll's sign-in build would rebuild
+  // a machine the user just chose to delete - real money against explicit
+  // intent.
+  const deleted = { "alice:linux": m("deleted", "linux") };
+  assert.deepEqual(missingOses(deleted, "alice"), ["windows"]);
+  const bothDeleted = { ...deleted, "alice:windows": m("deleted", "windows") };
+  assert.deepEqual(missingOses(bothDeleted, "alice"), []);
+});
+
+test("Fix round 1 (Critical 1): a manual Start still rebuilds a deleted machine", () => {
+  // Unlike missingOses (the automatic sign-in build), a MANUAL Start must
+  // still be able to bring a deliberately-deleted machine back - startPlan
+  // treats "deleted" the same as "no record at all".
+  assert.deepEqual(startPlan({ "alice:linux": m("deleted", "linux") }, "alice", "linux"), {
+    action: "build",
+    sleepOs: null,
+  });
+  // Deleting one OS while the other still runs still sleeps the other first.
+  const machines = { "alice:linux": m("running", "linux"), "alice:windows": m("deleted", "windows") };
+  assert.deepEqual(startPlan(machines, "alice", "windows"), { action: "build", sleepOs: "linux" });
+});
+
+test("Fix round 1 (Critical 1): a deleted machine does not block a wipe", () => {
+  const deleted = { "alice:linux": m("deleted", "linux") };
+  assert.equal(wipeRefusalReason(deleted, {}, "alice"), null);
 });

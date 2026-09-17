@@ -22,6 +22,12 @@ export function machineKey(username, os) {
   return `${username}:${os}`;
 }
 
+// A "deleted" record is a TOMBSTONE (api/session-ended.js), not the absence
+// of one - it exists specifically so this function does NOT treat a
+// deliberately-deleted machine as "missing" and hand it back to the sign-in
+// build in api/status.js. A manual Start must still rebuild a deleted
+// machine - that goes through startPlan below, which checks state
+// explicitly rather than relying on missingOses.
 export function missingOses(machines, username) {
   return MACHINE_OSES.filter((os) => !machines[machineKey(username, os)]);
 }
@@ -29,12 +35,13 @@ export function missingOses(machines, username) {
 // What to dispatch for the OS a user is switching TO, once their other
 // machine has actually stopped (api/session-slept.js). A switch is
 // "sleep the running one, then bring up the one asked for" - and "bring up"
-// means build when that OS has no machine at all yet, wake when it does
-// (parked or otherwise; session-slept only ever reaches this once the OTHER
-// os has just been confirmed asleep, so `os` itself cannot be the one that
-// just stopped).
+// means build when that OS has no LIVE machine yet (no record at all, or a
+// "deleted" tombstone), wake when a real one exists (parked or otherwise;
+// session-slept only ever reaches this once the OTHER os has just been
+// confirmed asleep, so `os` itself cannot be the one that just stopped).
 export function pendingWakeAction(machines, username, os) {
-  return machines[machineKey(username, os)] ? "wake" : "build";
+  const mine = machines[machineKey(username, os)];
+  return mine && mine.state !== "deleted" ? "wake" : "build";
 }
 
 // What Start should do, and whether the user's OTHER machine has to be put to
@@ -55,7 +62,12 @@ export function startPlan(machines, username, os) {
   // "do not start anything, keep polling". A caller that needs to tell
   // running from still-building apart must read the machine's own `state`
   // field itself; this function does not distinguish them in its return.
-  if (!mine) return { action: "build", sleepOs };
+  //
+  // A "deleted" record (api/session-ended.js's tombstone) is treated the
+  // same as no record at all here - a MANUAL Start is exactly the one place
+  // a deliberately-deleted machine SHOULD be rebuilt; only the automatic
+  // sign-in build (missingOses, in api/status.js) must leave it alone.
+  if (!mine || mine.state === "deleted") return { action: "build", sleepOs };
   if (mine.state === "sleeping") return { action: "wake", sleepOs };
   return { action: "adopt", sleepOs };
 }
@@ -84,6 +96,9 @@ export function wipeRefusalReason(machines, sessions, username) {
   if (SESSION_LIVE_STATUSES.includes(sessions[username]?.status)) {
     return "that desktop is running - destroy it first, then delete the data";
   }
+  // A "deleted" tombstone is deliberately NOT in this list - the whole point
+  // of deleting a machine is that its saved data can then be wiped, so a
+  // "deleted" record must never read as "live" here.
   const liveMachine = MACHINE_OSES.some((os) =>
     ["running", "building"].includes(machines[machineKey(username, os)]?.state)
   );

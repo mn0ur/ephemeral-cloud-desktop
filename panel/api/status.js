@@ -1,7 +1,7 @@
 import { sessionFromRequest, GOOGLE_CLIENT_ID } from "../lib/auth.js";
 import {
   loadSessions, putSession, dropSession, hasSavedData, stateConfigured, getNotice, getHealth, putHealth,
-  loadMachines, putMachine, claimOnce, releaseClaim,
+  loadMachines, putMachine, claimOnce,
 } from "../lib/state.js";
 import { dispatch, WORKFLOWS, runProgress, tokenConfigured } from "../lib/github.js";
 import {
@@ -60,9 +60,27 @@ export default async function handler(req, res) {
         // record appears, and get built a second time. dispatch.js's
         // start:<user> claim does not protect against this - it is released
         // as soon as that handler returns, long before the build completes.
+        //
+        // The remaining window - `sessions` was snapshotted at the top of
+        // this handler and a manual Start could land between that snapshot
+        // and the claimOnce below - is accepted, not closed: both claim keys
+        // (start:<user> and build:<user>:<os>) are deliberately disjoint (see
+        // the block comment above), and the gap is a few lines of synchronous
+        // JS wide, several orders of magnitude narrower than the minutes-long
+        // "building" window this check already closes.
         if (own?.os === os && own?.status === "building") return;
         const claim = `build:${session.user_id}:${os}`;
-        if (!(await claimOnce(claim, 1800))) return;
+        // 120s, not the machine's own minutes-long build time: this claim's
+        // job is only to stop the NEXT 5-second poll from re-dispatching
+        // while a dispatch is in flight or just failed. On SUCCESS the claim
+        // never needs releasing either - putMachine below makes missingOses
+        // stop returning this os on the very next poll, which is a stronger
+        // guard than the claim. On FAILURE (e.g. a GitHub outage) the claim
+        // is deliberately left to expire on its own: releasing it here would
+        // turn a GitHub outage into a dispatch attempt every 5 seconds for as
+        // long as the outage lasts, one per user+OS; leaving it held turns
+        // that into a natural ~2-minute backoff instead.
+        if (!(await claimOnce(claim, 120))) return;
         try {
           await dispatch(WORKFLOWS.start, {
             username: session.user_id, guest_username: session.user_id,
@@ -73,10 +91,6 @@ export default async function handler(req, res) {
             os, state: "building", created_at: Date.now() / 1000,
           });
         } catch (e) {
-          // A failed dispatch must release the claim - otherwise this OS
-          // would never be retried on a later poll until the 30-minute TTL
-          // expires, and the user would be stuck without a machine.
-          await releaseClaim(claim);
           console.error("sign-in build failed", os, e.message);
         }
       })

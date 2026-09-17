@@ -24,19 +24,40 @@ export const WORKFLOWS = {
   wake: "desktop-wake.yml",
 };
 
+// Every api/*.js function has a 10s hard limit (vercel.json maxDuration). A
+// GitHub call that hangs past that gets hard-killed by the platform BEFORE
+// any catch block runs - which, for a caller holding a claim, means the
+// claim is stuck for its full TTL with nothing in the logs explaining why.
+// Aborting at 8s makes the hang fail INSIDE this function instead, with a
+// clear error, leaving headroom for the caller's own cleanup to run.
+const GITHUB_TIMEOUT_MS = 8000;
+
 async function gh(path, options = {}) {
   if (!TOKEN) throw new Error("no GitHub token configured");
-  const r = await fetch(`https://api.github.com${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json",
-      "User-Agent": "desktop-control-panel",
-      ...(options.headers || {}),
-    },
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GITHUB_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch(`https://api.github.com${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+        "User-Agent": "desktop-control-panel",
+        ...(options.headers || {}),
+      },
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error(`GitHub API call to ${path} timed out after ${GITHUB_TIMEOUT_MS}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!r.ok) {
     const body = await r.text();
     const err = new Error(body.slice(0, 400) || `GitHub returned ${r.status}`);

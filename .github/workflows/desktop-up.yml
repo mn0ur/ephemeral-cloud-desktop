@@ -73,7 +73,7 @@ on:
         required: false
         default: "c7i.xlarge"
       region:
-        description: "AWS region. ap-south-1 (Mumbai) is the only one offered: me-central-1 (UAE) throttles every launch for this account. Admin-only from the panel; there is no policy here - the panel is the enforcement point. Each region has its own network stack and state key (see the terraform apply step)."
+        description: "AWS region. ap-south-1 (Mumbai) is the only one offered: me-central-1 (UAE) throttles every launch for this account. Only ap-south-1 is offered; this input is now a fixed single choice, not an access gate. The state key no longer varies by region (see the terraform apply step)."
         type: choice
         options: [ap-south-1]
         default: ap-south-1

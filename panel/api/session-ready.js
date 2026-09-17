@@ -27,9 +27,9 @@ export default async function handler(req, res) {
   // os was decided at dispatch from a verified session; the callback's value
   // is only a fallback for a session with no prior state (redeploy mid-run).
   const os = prior.os || (req.body?.os === "windows" ? "windows" : "linux");
-  // region was decided at dispatch from a verified admin session; the
-  // callback's value is only a fallback for a session with no prior state
-  // (redeploy mid-run), same as os above.
+  // region was decided at dispatch (now always ap-south-1); the callback's
+  // value is only a fallback for a session with no prior state (redeploy
+  // mid-run), same as os above.
   const region = prior.region || (REGIONS[req.body?.region] ? req.body.region : "ap-south-1");
   await putSession(username, {
     status: "ready", // the page polls the per-OS probe before calling it active

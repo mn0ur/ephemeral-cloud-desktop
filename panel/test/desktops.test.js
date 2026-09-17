@@ -27,6 +27,12 @@ test("requestedRegion: ap-south-1 is the only region, whatever is asked for", ()
   assert.equal(requestedRegion("me-central-1"), "ap-south-1");
   assert.equal(requestedRegion(undefined), "ap-south-1");
   assert.deepEqual(Object.keys(REGIONS), ["ap-south-1"]);
+  // Single argument only. A second parameter reappearing would mean someone
+  // reintroduced an isAdmin gate (what this test can't otherwise catch: with
+  // REGIONS holding exactly one key equal to the function's own fallback,
+  // every legal input returns that same value under this implementation, the
+  // old two-arg one, or a stub that ignores its argument entirely).
+  assert.equal(requestedRegion.length, 1);
 });
 
 test("probeUrl: /healthz for linux, DCV root for windows, null passes through", () => {

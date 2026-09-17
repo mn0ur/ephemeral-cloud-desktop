@@ -130,6 +130,15 @@ function renderMine(s) {
   const mine = s.my_session;
   if (!mine || mine.phase === "error" || mine.status === "error") {
     lastPhase = null;
+    // Guests removed 2026-09-17: everyone who can start keeps their files, so
+    // there is no choice to offer. An account without access gets told so
+    // plainly instead of a button that would fail.
+    if (!session.has_access) {
+      box.innerHTML =
+        '<div class="status"><span class="dot"></span> No access yet</div>' +
+        '<div class="sub">Your account isn\'t enabled for Sihaab yet. Ask the owner to add you, then sign in again.</div>';
+      return;
+    }
     // Delete-saved-data appears only when there is some and nothing is running.
     // Deliberately not beside Destroy: destroy ends a session and KEEPS your
     // files, this throws them away. Side by side is how someone deletes their
@@ -139,9 +148,6 @@ function renderMine(s) {
         <div class="sub">You have saved files from a previous session. They are restored on your next start.</div>
         <div class="row"><button id="wipe" class="stop">Delete my saved data</button></div>
       </div>` : "";
-    const persistLabel = session.can_persist
-      ? `<label><input type="checkbox" id="persist"> Keep my files after destroy</label>`
-      : "";
     // Every tier picks the OS for the machine it is about to create. Nothing
     // is running until this Start button is pressed.
     const osSelect = `<label>Operating system <select id="os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>`;
@@ -154,7 +160,6 @@ function renderMine(s) {
     box.innerHTML = `
       ${noticeBlock}
       ${osSelect}
-      ${persistLabel}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
       ${dataBlock}`;
     $("start").onclick = () => go("start");
@@ -285,7 +290,6 @@ async function copyToClipboard(btn) {
 async function go(action) {
   const body = { action };
   if (action === "start") {
-    body.persist = $("persist")?.checked || false;
     body.os = $("os")?.value || "linux";
   }
   if (action === "destroy" && !confirm(lastPhase === "starting"

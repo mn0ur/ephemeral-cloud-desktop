@@ -124,7 +124,13 @@ export function tokenMatches(token, storedHash) {
 export function canCancel(s, now = Date.now() / 1000) {
   const phase = sessionPhase(s);
   if (phase === "booting" || phase === "running") return true;
-  if (phase === "starting") return now - (Number(s.dispatched_at) || 0) >= CANCEL_AFTER_S;
+  // "building" (first-time build) and "waking" (parked-machine wake) get the
+  // same grace period as "starting": an immediate cancel is almost always a
+  // misread of the screen, and the destroy would only queue behind the
+  // build/wake anyway - it does not actually stop anything sooner.
+  if (phase === "starting" || phase === "building" || phase === "waking") {
+    return now - (Number(s.dispatched_at) || 0) >= CANCEL_AFTER_S;
+  }
   return false;
 }
 

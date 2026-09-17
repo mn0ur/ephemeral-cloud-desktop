@@ -52,7 +52,9 @@ let lastPhase = null;
 // 186-189s, Linux ~325s, destroy 105-140s. The bar fills to 95% at the
 // expected time and then HOLDS with "taking longer" - it never claims 100%
 // before the real state change arrives from the poll.
-const EXPECTED_S = { linux: 330, windows: 200, destroy: 135, wake_linux: 75, wake_windows: 120 };
+// sleep: 135s is a placeholder matching destroy's measured time, not yet
+// measured itself - Task 8 measures a real sleep and corrects it.
+const EXPECTED_S = { linux: 330, windows: 200, destroy: 135, wake_linux: 75, wake_windows: 120, sleep: 135 };
 // Client-side anchor for the moment we clicked, used until the server-side
 // timestamp (dispatched_at / destroy_dispatched_at) is on the session.
 let actionStartedAt = null;
@@ -226,20 +228,29 @@ function renderMine(s) {
   }
 
   if (phase === "building") {
-    box.innerHTML =
-      `<div class="status"><span class="dot work"></span> Setting up your ${osLabel} desktop for the first time&hellip;</div>` +
+    let html = `<div class="status"><span class="dot work"></span> Setting up your ${osLabel} desktop for the first time&hellip;</div>` +
       '<div class="sub">This happens once. After this, starting it takes about a minute.</div>' +
-      barHtml(isWin ? "windows" : "linux", mine.dispatched_at) + stepsHtml(s.progress);
+      barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
+    // No Cancel for the first minute (same grace period as a plain start -
+    // see canCancel). Cancelling a build removes the half-made machine, so
+    // it dispatches "delete", not "destroy" - there is no session to sleep.
+    if (mine.can_cancel) html += '<div class="row"><button id="cancel-build" class="stop">Cancel</button></div>';
+    html += stepsHtml(s.progress);
+    box.innerHTML = html;
     tickBars();
+    if ($("cancel-build")) $("cancel-build").onclick = () => go("delete");
     return;
   }
 
   if (phase === "waking") {
-    box.innerHTML =
-      `<div class="status"><span class="dot work"></span> Waking your ${osLabel} desktop&hellip;</div>` +
+    let html = `<div class="status"><span class="dot work"></span> Waking your ${osLabel} desktop&hellip;</div>` +
       '<div class="sub">Your files, apps and settings are exactly as you left them.</div>' +
-      barHtml(isWin ? "wake_windows" : "wake_linux", mine.dispatched_at) + stepsHtml(s.progress);
+      barHtml(isWin ? "wake_windows" : "wake_linux", mine.dispatched_at);
+    if (mine.can_cancel) html += '<div class="row"><button id="cancel-build" class="stop">Cancel</button></div>';
+    html += stepsHtml(s.progress);
+    box.innerHTML = html;
     tickBars();
+    if ($("cancel-build")) $("cancel-build").onclick = () => go("delete");
     return;
   }
 
@@ -247,8 +258,20 @@ function renderMine(s) {
     box.innerHTML =
       `<div class="status"><span class="dot work"></span> Putting your ${osLabel} desktop to sleep&hellip;</div>` +
       '<div class="sub">Everything on it is kept. Starting it again takes about a minute.</div>' +
-      barHtml("destroy", mine.sleep_dispatched_at);
+      barHtml("sleep", mine.sleep_dispatched_at);
     tickBars();
+    return;
+  }
+
+  // Every phase this file knows how to draw returns above. Anything else -
+  // e.g. a cached older app.js talking to a newer server that has started
+  // emitting a phase this build predates - must NOT fall through into the
+  // running/booting card below: that card can render credentials and an
+  // Open button for a machine that, for all this page actually knows, isn't
+  // running at all.
+  if (phase !== "booting" && phase !== "running") {
+    box.innerHTML =
+      '<div class="status"><span class="dot"></span> Your desktop\'s status is unavailable &mdash; reload the page.</div>';
     return;
   }
 
@@ -335,7 +358,13 @@ async function go(action) {
   if (action === "destroy" && !confirm(lastPhase === "starting"
     ? "Cancel starting your desktop? The machine being created will be removed."
     : "Destroy your desktop? Your files are kept.")) return;
-  if (action === "delete" && !confirm(
+  // Cancelling a build/wake in progress also dispatches "delete" - there is
+  // no finished machine to describe yet, so it gets the cancel wording
+  // instead of the normal "anything you installed is lost" delete wording.
+  if (action === "delete" && (lastPhase === "building" || lastPhase === "waking") && !confirm(
+    "Cancel? The machine being created will be removed."
+  )) return;
+  if (action === "delete" && lastPhase !== "building" && lastPhase !== "waking" && !confirm(
     "Delete this machine?\n\nAnything you installed on it is lost. Your saved files are kept, and a new machine is built next time you start (about 3 minutes)."
   )) return;
   if (action === "sleep" && !confirm(

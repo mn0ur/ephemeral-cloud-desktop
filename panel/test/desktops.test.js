@@ -76,6 +76,16 @@ test("canCancel: hidden for the first minute of a start, then allowed; always fo
   assert.equal(canCancel(null, t0), false);
 });
 
+test("canCancel: a first-time build and a wake get the same grace period as a plain start", () => {
+  const t0 = 1000;
+  const building = { status: "building", dispatched_at: t0 };
+  const waking = { status: "waking", dispatched_at: t0 };
+  assert.equal(canCancel(building, t0 + 5), false);
+  assert.equal(canCancel(building, t0 + 60), true);
+  assert.equal(canCancel(waking, t0 + 5), false);
+  assert.equal(canCancel(waking, t0 + 60), true);
+});
+
 test("runBelongsTo: only this user's run for this action, not a user whose name merely starts the same", () => {
   const since = Date.parse("2026-09-15T13:47:50Z") / 1000;
   // GitHub returns run-name as display_title; name is always the workflow name

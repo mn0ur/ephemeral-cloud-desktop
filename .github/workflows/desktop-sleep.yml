@@ -62,21 +62,58 @@ jobs:
           OS="${{ inputs.os }}"
 
           # Find this user's machine by tag. Owner+OS is unique: one machine per
-          # user per OS (panel/lib/machines.js).
-          ID=$(aws ec2 describe-instances \
+          # user per OS (panel/lib/machines.js). Query per-INSTANCE, not
+          # per-reservation: Reservations[].Instances[0] would silently collapse
+          # a duplicate/retried build (two reservations) down to one ID, and
+          # stopping only one of two real instances is exactly the kind of
+          # "reported success, actually half-done" bug this step must not have.
+          IDS=$(aws ec2 describe-instances \
             --filters "Name=tag:Owner,Values=$USER_NAME" "Name=tag:OS,Values=$OS" \
               "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
-            --query 'Reservations[].Instances[0].InstanceId' --output text 2>/dev/null || true)
-          if [ -z "$ID" ] || [ "$ID" = "None" ]; then
-            echo "::warning::no $OS machine found for $USER_NAME - nothing to stop"
-          else
-            echo "stopping $ID"
-            aws ec2 stop-instances --instance-ids "$ID" >/dev/null
-            aws ec2 wait instance-stopped --instance-ids "$ID" || echo "::warning::stop did not confirm within the wait; the panel is told anyway"
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ $? -ne 0 ]; then
+            echo "::error::describe-instances failed while looking up the $OS machine for $USER_NAME - aborting, nothing was touched"
+            exit 1
           fi
 
-          # Park the hostname on an unroutable address while the machine sleeps,
-          # so the name never points at whatever takes that IP next.
+          COUNT=0
+          if [ -n "$IDS" ] && [ "$IDS" != "None" ]; then
+            COUNT=$(echo "$IDS" | wc -w)
+          fi
+
+          # No match and more-than-one match are both refused loudly (exit
+          # non-zero, no DNS park, no callback) so the panel's existing record
+          # is left exactly as it was - a red run beats a false "parked".
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::no $OS machine found for $USER_NAME - nothing to stop; the panel's record is left untouched"
+            exit 1
+          fi
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::$COUNT $OS instances matched Owner=$USER_NAME ($IDS) - refusing to guess which one to stop, this is an anomaly for a human to look at"
+            exit 1
+          fi
+
+          ID="$IDS"
+          echo "stopping $ID"
+          # Checked explicitly rather than relying on -e (which is deliberately
+          # not set, so the messages below stay attributable to the exact
+          # command that failed): an unchecked stop-instances would let the
+          # script wait on an instance nobody actually told to stop.
+          if ! aws ec2 stop-instances --instance-ids "$ID" >/dev/null; then
+            echo "::error::stop-instances failed for $ID - it may still be running; aborting before DNS park or callback"
+            exit 1
+          fi
+          # An instance already in state "stopped" is success here, not a
+          # failure - both stop-instances and this wait return immediately for
+          # it, so no special-casing is needed.
+          if ! aws ec2 wait instance-stopped --instance-ids "$ID"; then
+            echo "::error::stop did not confirm for $ID within the wait - aborting before DNS park or callback; the panel's record is left untouched"
+            exit 1
+          fi
+
+          # Only reached once the stop is confirmed. Park the hostname on an
+          # unroutable address while the machine sleeps, so the name never
+          # points at whatever takes that IP next, then tell the panel.
           HOST="$USER_NAME.desktop.sihaab.com"
           [ "$OS" = "windows" ] && HOST="$USER_NAME-desktop.sihaab.com"
           bash scripts/set-dns.sh "$HOST" 192.0.2.1 "$CF_ZONE" false || echo "::warning::DNS park failed for $HOST"

@@ -16,8 +16,17 @@ export default async function handler(req, res) {
 
   const machines = await loadMachines();
   const prior = machines[machineKey(username, os)];
-  if (prior) await putMachine(username, os, { ...prior, state: "sleeping", slept_at: Date.now() / 1000 });
+  if (prior) {
+    await putMachine(username, os, { ...prior, state: "sleeping", slept_at: Date.now() / 1000 });
+    await logEvent("slept", { username, os });
+  } else {
+    // The machine IS stopped (the workflow only calls this after a confirmed
+    // stop) but there was no record to update - an out-of-band delete raced
+    // this callback. Distinct event so the mismatch shows up in history
+    // instead of looking like an ordinary sleep; still 200, since nothing a
+    // retry could fix is missing here.
+    await logEvent("slept_orphan", { username, os });
+  }
   await dropSession(username);
-  await logEvent("slept", { username, os });
   return res.status(200).json({ ok: true });
 }

@@ -147,7 +147,18 @@ jobs:
             sleep 10
           done
           WAKE_ELAPSED=$(( $(date +%s) - WAKE_START_TS ))
-          echo "desktop answered with HTTP 200 ${WAKE_ELAPSED}s after waking"
+          echo "desktop answered with HTTP 200 ${WAKE_ELAPSED}s after waking (certificate not yet verified - that check used -k)"
+
+          # Same reasoning as desktop-up.yml: -k accepts Caddy's internal
+          # self-signed fallback (DNS-01 failure or a Let's Encrypt rate
+          # limit), which is a 200 for a URL the user's browser will refuse.
+          # One strict check without -k before telling the panel anything.
+          WAKE_STRICT_CODE=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "$CHECK_URL" || true)
+          if [ "$WAKE_STRICT_CODE" != "200" ]; then
+            echo "::error::the desktop answers over HTTPS but its certificate is not trusted (strict check without -k got status '$WAKE_STRICT_CODE') - the panel will NOT be told this session is ready"
+            exit 1
+          fi
+          echo "certificate verified - desktop is genuinely ready"
 
           # The password lives on the user's data volume as a DesktopPassword
           # tag (see desktop-up.yml's "Guest-only setup" step, which creates it

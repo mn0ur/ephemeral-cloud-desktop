@@ -370,7 +370,21 @@ jobs:
             sleep 10
           done
           ELAPSED=$(( $(date +%s) - START_TS ))
-          echo "desktop answered with HTTP 200 after ${ELAPSED}s"
+          echo "desktop answered with HTTP 200 after ${ELAPSED}s (certificate not yet verified - that check used -k)"
+
+          # -k was needed while a fresh certificate might still be being
+          # issued, but a 200 through -k also happens when Caddy fell back to
+          # its internal self-signed cert (DNS-01 failed, or the Let's
+          # Encrypt rate limit this repo has hit for real) - a URL the user's
+          # browser will refuse to open. Now that the loose loop above has
+          # succeeded, do ONE strict check without -k before telling the
+          # panel anything.
+          STRICT_CODE=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "$CHECK_URL" || true)
+          if [ "$STRICT_CODE" != "200" ]; then
+            echo "::error::the desktop answers over HTTPS but its certificate is not trusted (strict check without -k got status '$STRICT_CODE') - the panel will NOT be told this session is ready, because a browser would refuse to open it"
+            exit 1
+          fi
+          echo "certificate verified - desktop is genuinely ready"
 
       - name: Tell desktop.sihaab.com the guest session is ready
         # The control panel holds no AWS or Terraform credentials - by design,

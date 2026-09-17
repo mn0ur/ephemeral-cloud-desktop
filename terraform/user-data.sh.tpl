@@ -388,21 +388,26 @@ fi
 # ---------------------------------------------------------------------------
 # Ordering drop-ins - defence for a PLAIN REBOOT, not this bootstrap run.
 #
-# Nothing otherwise tells systemd that docker/containerd need $PERSIST_ROOT
-# mounted before they start. If the mount unit loses that race on a later
-# restart, Docker starts against an empty directory and sees none of its
+# Nothing otherwise tells systemd that docker/containerd need their storage
+# mounted before they start. containerd's real storage root is NOT
+# $PERSIST_ROOT itself - it is /var/lib/containerd, a separate bind mount
+# (PERSIST_ROOT/containerd -> /var/lib/containerd, added to fstab above) with
+# its own mount unit. Requiring only $PERSIST_ROOT does not guarantee that
+# bind has been applied, so containerd could still win the race against it
+# and start against the empty root-disk directory, seeing none of its
 # containers - found for real on a machine that came back with no container
-# at all. RequiresMountsFor makes systemd order (and wait for) the mount unit
-# for $PERSIST_ROOT before either service starts.
+# at all. Docker's own data-root IS a plain directory under $PERSIST_ROOT,
+# but docker also depends on containerd's state being there, so it needs
+# both paths too.
 # ---------------------------------------------------------------------------
 mkdir -p /etc/systemd/system/docker.service.d /etc/systemd/system/containerd.service.d
 cat >/etc/systemd/system/docker.service.d/persist-mount.conf <<UNIT
 [Unit]
-RequiresMountsFor=$PERSIST_ROOT
+RequiresMountsFor=$PERSIST_ROOT /var/lib/containerd
 UNIT
 cat >/etc/systemd/system/containerd.service.d/persist-mount.conf <<UNIT
 [Unit]
-RequiresMountsFor=$PERSIST_ROOT
+RequiresMountsFor=/var/lib/containerd
 UNIT
 systemctl daemon-reload
 
@@ -612,10 +617,17 @@ fi
 
 # enable AFTER the unit file exists and after the daemon-reload above, so
 # this genuinely takes effect rather than enabling a stale or absent unit -
-# `disabled` was found on a real machine. Logged so a future boot log proves
-# whether it actually stuck.
+# `disabled` was found on a real machine. This is a real assertion, not a log
+# line: every other integrity check in this file exits 1 on failure, and a
+# service that silently stayed disabled is exactly the bug being fixed here.
 systemctl enable caddy
-echo "caddy enable state: $(systemctl is-enabled caddy 2>&1)"
+CADDY_ENABLE_STATE="$(systemctl is-enabled caddy 2>&1)"
+if [ "$CADDY_ENABLE_STATE" != "enabled" ]; then
+  echo "FATAL: systemctl enable caddy did not stick - is-enabled reports '$CADDY_ENABLE_STATE'."
+  echo "A reboot would come back with caddy not running and no TLS ingress."
+  exit 1
+fi
+echo "caddy enable state: $CADDY_ENABLE_STATE"
 systemctl restart caddy
 
 # ---------------------------------------------------------------------------
@@ -630,6 +642,11 @@ systemctl restart caddy
 cat >/usr/local/bin/desktop-boot-restore <<'BOOTRESTORE'
 #!/bin/bash
 set -u
+# Unconditionally starting webtop here overrides `--restart unless-stopped`
+# for someone who deliberately docker-stopped it for maintenance - but in
+# this architecture "sleep" stops the INSTANCE, not the container, so a
+# stopped container found at boot means something drifted, not a choice made
+# on a running machine. Accepted trade-off, not an oversight.
 docker start webtop || true
 systemctl start caddy || true
 BOOTRESTORE

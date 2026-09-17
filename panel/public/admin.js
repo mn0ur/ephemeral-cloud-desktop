@@ -62,15 +62,6 @@ async function setUser(list, action, email) {
   poll();
 }
 
-async function saveLimit() {
-  const minutes = Number($("limit-input").value);
-  const r = await fetch("/api/admin/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ guest_limit_minutes: minutes }),
-  });
-  if (!r.ok) $("err").textContent = (await r.json()).error || await r.text();
-}
-
 async function loadHistory() {
   try {
     const r = await fetch("/api/history", { cache: "no-store" });
@@ -117,7 +108,7 @@ async function poll() {
 
     const isAdmin = Boolean(session?.is_admin);
     $("not-admin").style.display = session && !isAdmin ? "block" : "none";
-    for (const id of ["sessions-card", "config-card", "tiers-card", "history-card"]) {
+    for (const id of ["sessions-card", "tiers-card", "history-card"]) {
       $(id).style.display = isAdmin ? "block" : "none";
     }
     if (!isAdmin) return;
@@ -125,7 +116,6 @@ async function poll() {
     renderSessions(s.sessions);
     renderTierList($("admin-list"), s.admins, (email) => setUser("admins", "remove", email));
     renderTierList($("permanent-list"), s.permanent_users, (email) => setUser("permanent_users", "remove", email));
-    if (document.activeElement !== $("limit-input")) $("limit-input").value = s.guest_limit_minutes;
     loadHistory();
   } catch (e) {
     $("err").textContent = "status unreachable: " + e.message;
@@ -136,7 +126,6 @@ $("g-signout").onclick = () => {
   try { google.accounts.id.disableAutoSelect(); } catch { /* not loaded yet */ }
   fetch("/api/google-logout", { method: "POST" }).then(() => location.reload());
 };
-$("limit-save").onclick = saveLimit;
 $("admin-add").onclick = () => {
   const email = $("admin-email").value.trim();
   if (email) setUser("admins", "add", email);

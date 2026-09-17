@@ -31,12 +31,28 @@ export function hourlyRate(os, market) {
   return market === "on-demand" ? HOURLY_USD_ONDEMAND : HOURLY_USD;
 }
 
-// Every tier chooses its OS at Start (owner decision 2026-09-15: guests,
-// permanent users and admins alike). Guests stay cost-capped by the reaper's
-// time limit. Exact match only - anything that is not the string "windows"
-// is linux, so a malformed body can never select something unexpected.
+// Every tier chooses its OS at Start (owner decision 2026-09-15). Only an
+// admin or a permanent user can start at all - see startRefusalReason.
+// Nothing caps how long a session runs; auto-sleep is a later plan. Exact
+// match only - anything that is not the string "windows" is linux, so a
+// malformed body can never select something unexpected.
 export function requestedOs(bodyOs) {
   return bodyOs === "windows" ? "windows" : "linux";
+}
+
+// Guests were removed on 2026-09-17: only an admin or a permanent user may
+// start a desktop. The client hides the button, but this is the enforcement
+// point - the client is only a hint, same rule as os and region.
+export const NO_ACCESS_MESSAGE =
+  "Your account doesn't have access to Sihaab yet. Ask the owner to add you.";
+
+export function startRefusalReason(session, existingSession) {
+  if (!session) return "sign in first";
+  if (!session.has_access) return NO_ACCESS_MESSAGE;
+  if (["pending", "ready", "active"].includes(existingSession?.status)) {
+    return "you already have a desktop running";
+  }
+  return null;
 }
 
 // What the user's session IS, from their point of view. Derived on the server
@@ -120,9 +136,7 @@ export function runBelongsTo(run, username, sinceTs, verb) {
 }
 
 // Mumbai stays the default so every running session (and the state key that
-// tracks it, see dispatch.js) keeps working unchanged. UAE AMIs are being
-// baked in parallel - az matches terraform/variables.tf's az_suffix default
-// per region.
+// tracks it, see dispatch.js) keeps working unchanged.
 export const REGIONS = {
   "ap-south-1": { az: "c", label: "India (Mumbai)" },
   // me-central-1 (UAE) was here 2026-09-12/13 and is removed: AWS throttles
@@ -130,12 +144,13 @@ export const REGIONS = {
   // seen in August and again 2026-09-12). Re-add once a launch there works.
 };
 
-// Same shape as requestedOs: admin-only, server is the actual enforcement
-// point, the client selector is only a hint.
-export function requestedRegion(isAdmin, bodyRegion) {
-  return isAdmin === true && Object.prototype.hasOwnProperty.call(REGIONS, bodyRegion)
-    ? bodyRegion
-    : "ap-south-1";
+// One region: India (ap-south-1). UAE was removed 2026-09-13 (AWS throttles
+// every launch there for this account) and the owner confirmed 2026-09-17
+// that this app uses India only. Kept as a function, not a constant, because
+// the session records the region it ran in and a second region would return
+// here rather than in every caller.
+export function requestedRegion(bodyRegion) {
+  return Object.prototype.hasOwnProperty.call(REGIONS, bodyRegion) ? bodyRegion : "ap-south-1";
 }
 
 // What "the desktop answers" means per OS. Linux: Caddy serves /healthz.

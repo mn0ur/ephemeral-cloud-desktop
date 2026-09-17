@@ -4,7 +4,7 @@ import {
   hourlyRate, requestedOs, probeUrl, HOURLY_USD, HOURLY_USD_WINDOWS, requestedRegion, REGIONS,
   sessionPhase, canCancel, CANCEL_AFTER_S, runBelongsTo,
   HOURLY_USD_ONDEMAND, UNREACHABLE_AFTER_S, HEALTH_EVERY_S, healthCheckDue, applyHealth,
-  hashToken, tokenMatches,
+  hashToken, tokenMatches, startRefusalReason,
 } from "../lib/desktops.js";
 
 test("hourlyRate: linux and undefined use the CPU rate, windows its own", () => {
@@ -22,12 +22,17 @@ test("requestedOs: every tier may choose windows; anything else is linux", () =>
   assert.equal(requestedOs({ os: "windows" }), "linux");
 });
 
-test("requestedRegion: only an admin asking for a known region gets it, else the default", () => {
-  assert.equal(requestedRegion(true, "ap-south-1"), "ap-south-1");
-  assert.equal(requestedRegion(true, "eu-west-1"), "ap-south-1"); // unknown region
-  assert.equal(requestedRegion(true, "me-central-1"), "ap-south-1"); // not offered any more
-  assert.equal(requestedRegion(true, undefined), "ap-south-1");
+test("requestedRegion: ap-south-1 is the only region, whatever is asked for", () => {
+  assert.equal(requestedRegion("ap-south-1"), "ap-south-1");
+  assert.equal(requestedRegion("me-central-1"), "ap-south-1");
+  assert.equal(requestedRegion(undefined), "ap-south-1");
   assert.deepEqual(Object.keys(REGIONS), ["ap-south-1"]);
+  // Single argument only. A second parameter reappearing would mean someone
+  // reintroduced an isAdmin gate (what this test can't otherwise catch: with
+  // REGIONS holding exactly one key equal to the function's own fallback,
+  // every legal input returns that same value under this implementation, the
+  // old two-arg one, or a stub that ignores its argument entirely).
+  assert.equal(requestedRegion.length, 1);
 });
 
 test("probeUrl: /healthz for linux, DCV root for windows, null passes through", () => {
@@ -129,4 +134,22 @@ test("tokenMatches: only the exact per-session token proves a reclaim notice", (
   assert.equal(tokenMatches(undefined, h), false);
   assert.equal(tokenMatches("a".repeat(48), undefined), false);
   assert.notEqual(h, "a".repeat(48)); // stored hashed, never raw
+});
+
+test("startRefusalReason: only accounts with access may start, and only one desktop each", () => {
+  const ok = { has_access: true, is_admin: false };
+  assert.equal(startRefusalReason(ok, null), null);
+  assert.equal(
+    startRefusalReason({ has_access: false, is_admin: false }, null),
+    "Your account doesn't have access to Sihaab yet. Ask the owner to add you."
+  );
+  // an admin always has access
+  assert.equal(startRefusalReason({ has_access: true, is_admin: true }, null), null);
+  // already running or starting: one desktop per person
+  for (const status of ["pending", "ready", "active"]) {
+    assert.equal(startRefusalReason(ok, { status }), "you already have a desktop running");
+  }
+  // a finished/errored session is not in the way
+  assert.equal(startRefusalReason(ok, { status: "error" }), null);
+  assert.equal(startRefusalReason(undefined, null), "sign in first");
 });

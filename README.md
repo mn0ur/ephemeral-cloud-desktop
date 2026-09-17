@@ -6,7 +6,7 @@ when nobody's using it.** One click to start, one click to destroy — your
 files, apps, and settings survive every teardown.
 
 **Live:** [desktop.sihaab.com](https://desktop.sihaab.com) — self-service panel with Google sign-in
-**Admin console:** `admin.sihaab.com` — tiers, guest limits, live session state
+**Admin console:** `admin.sihaab.com` — tiers, live session state
 
 ---
 
@@ -98,14 +98,17 @@ actually safe to run unattended, from a cron job, on every session.
   **fixed-cost compute plane** (AWS) — the always-on part of this project
   (the website) runs for effectively nothing, and the part that costs real
   money (a GPU-capable desktop) exists only while someone is using it.
-- **A real tiered-access model**, not a toggle: admins, permanent users, and
-  guests, backed by Redis, enforced server-side (never trusted from the
-  client) at the one place that actually dispatches AWS work.
-- **A scheduled reaper**, not an honor system. Guest desktops carry a
-  `Role=guest-desktop` AWS tag (no hardcoded username list — discovery is by
-  tag) and get destroyed by a cron-triggered workflow the moment they exceed
-  an admin-configurable time limit, based on the EC2 API's own `LaunchTime`
-  rather than an in-guest activity tracker that could silently go stale.
+- **A real tiered-access model**, not a toggle: only admins and permanent
+  users may start a desktop (guests were removed 2026-09-17 — everyone who
+  had access keeps their files), backed by Redis, enforced server-side
+  (never trusted from the client) at the one place that actually dispatches
+  AWS work.
+- **A scheduled visibility pass, not an honor system.** A cron-triggered
+  workflow discovers every running desktop by AWS tag (no hardcoded
+  username list) and warns in the run summary about anything that has been
+  up for more than 8 hours, based on the EC2 API's own `LaunchTime`. It is
+  read-only — it destroys nothing; auto-sleep for long-running desktops is
+  a later plan.
 - **An AMI baking pipeline** (`bake-ami.yml`) that pre-installs everything
   user-data would otherwise fetch on every boot — apt packages, the Caddy
   binary with its DNS plugin, and (opt-in) the NVIDIA driver stack — cutting
@@ -325,7 +328,7 @@ panel/                    Vercel serverless panel
   desktop-up.yml            start a session (owner or guest, CPU or GPU)
   desktop-down.yml          destroy a session, keeping data if asked
   desktop-wipe.yml          permanently delete saved data
-  desktop-reaper.yml        cron-scheduled guest time-limit enforcement
+  desktop-reaper.yml        cron-scheduled read-only visibility pass (warns, destroys nothing)
   bake-ami.yml               pre-bake a CPU or GPU AMI
 scripts/set-dns.sh        in-place Cloudflare DNS update (never deletes)
 docs/                     design specs, implementation plans, IAM policy

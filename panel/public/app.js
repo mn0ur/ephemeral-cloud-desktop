@@ -118,7 +118,7 @@ function renderMine(s) {
     box.innerHTML =
       `<div class="status"><span class="dot work"></span> ${pendingAction === "destroy" ? "Shutting down your desktop&hellip;" : "Starting your desktop&hellip;"}</div>` +
       `<div class="sub">${pendingAction === "destroy"
-        ? "Terminating the instance. Your files are kept if you chose to keep them."
+        ? "Terminating the instance. Your files are kept."
         : "We're creating a fresh machine for you."}</div>` +
       barHtml(pendingAction === "destroy" ? "destroy" : ($("os")?.value || s.my_session?.os || "linux"),
         (pendingAction === "destroy" ? s.my_session?.destroy_dispatched_at : s.my_session?.dispatched_at) || actionStartedAt) +
@@ -130,6 +130,15 @@ function renderMine(s) {
   const mine = s.my_session;
   if (!mine || mine.phase === "error" || mine.status === "error") {
     lastPhase = null;
+    // Guests removed 2026-09-17: everyone who can start keeps their files, so
+    // there is no choice to offer. An account without access gets told so
+    // plainly instead of a button that would fail.
+    if (!session.has_access) {
+      box.innerHTML =
+        '<div class="status"><span class="dot"></span> No access yet</div>' +
+        '<div class="sub">Your account isn\'t enabled for Sihaab yet. Ask the owner to add you, then sign in again.</div>';
+      return;
+    }
     // Delete-saved-data appears only when there is some and nothing is running.
     // Deliberately not beside Destroy: destroy ends a session and KEEPS your
     // files, this throws them away. Side by side is how someone deletes their
@@ -139,9 +148,6 @@ function renderMine(s) {
         <div class="sub">You have saved files from a previous session. They are restored on your next start.</div>
         <div class="row"><button id="wipe" class="stop">Delete my saved data</button></div>
       </div>` : "";
-    const persistLabel = session.can_persist
-      ? `<label><input type="checkbox" id="persist"> Keep my files after destroy</label>`
-      : "";
     // Every tier picks the OS for the machine it is about to create. Nothing
     // is running until this Start button is pressed.
     const osSelect = `<label>Operating system <select id="os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>`;
@@ -154,7 +160,6 @@ function renderMine(s) {
     box.innerHTML = `
       ${noticeBlock}
       ${osSelect}
-      ${persistLabel}
       <div class="row"><button id="start" class="go">Start my desktop</button></div>
       ${dataBlock}`;
     $("start").onclick = () => go("start");
@@ -189,7 +194,7 @@ function renderMine(s) {
   if (phase === "destroying") {
     box.innerHTML =
       `<div class="status"><span class="dot work"></span> Shutting down your ${osLabel} desktop&hellip;</div>` +
-      '<div class="sub">Your files are kept if you chose to keep them.</div>' +
+      '<div class="sub">Your files are kept.</div>' +
       barHtml("destroy", mine.destroy_dispatched_at) + stepsHtml(s.progress);
     tickBars();
     return;
@@ -214,10 +219,6 @@ function renderMine(s) {
     // Per session from the server: Windows and a Linux on-demand fallback cost more than Linux spot.
     const rate = mine.hourly_usd ?? (isWin ? s.hourly_usd_windows : s.hourly_usd);
     html += ` <span class="sub">&middot; ${fmtDur(secs)} &middot; ~$${((secs / 3600) * rate).toFixed(2)} this session</span>`;
-  }
-  if (mine.expires_at) {
-    const left = mine.expires_at - Date.now() / 1000;
-    html += ` <span class="sub">&middot; ${left > 0 ? fmtDur(left) + " left" : "ending&hellip;"}</span>`;
   }
   html += "</div>";
   if (!running) html += barHtml(isWin ? "windows" : "linux", mine.dispatched_at);
@@ -285,12 +286,11 @@ async function copyToClipboard(btn) {
 async function go(action) {
   const body = { action };
   if (action === "start") {
-    body.persist = $("persist")?.checked || false;
     body.os = $("os")?.value || "linux";
   }
   if (action === "destroy" && !confirm(lastPhase === "starting"
     ? "Cancel starting your desktop? The machine being created will be removed."
-    : "Destroy your desktop? Your files survive only if you chose to keep them.")) return;
+    : "Destroy your desktop? Your files are kept.")) return;
   $("err").textContent = "";
   busy = true; pendingAction = action; actionStartedAt = Date.now() / 1000;
   startedByMe = action === "start"; // a cancel must not auto-open the machine it cancels

@@ -44,7 +44,7 @@ on:
         required: false
         default: ""
       persist:
-        description: "Guest chose to keep their data after destroy."
+        description: "Keep the user's data after destroy. Guests were removed 2026-09-17; every caller now is a permanent user, so the panel always sends true."
         type: boolean
         default: false
       enable_access:
@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       is_guest:
-        description: "True if this session is a guest (no persist option, subject to the reaper's time limit). Set by the panel; false for anything dispatched by hand."
+        description: "Legacy: guests were removed 2026-09-17 and the panel always sends false. Kept so an old dispatch by hand still validates; true only adds the Role=guest-desktop tag."
         type: boolean
         default: false
       gpu:
@@ -73,7 +73,7 @@ on:
         required: false
         default: "c7i.xlarge"
       region:
-        description: "AWS region. ap-south-1 (Mumbai) is the only one offered: me-central-1 (UAE) throttles every launch for this account. Admin-only from the panel; there is no policy here - the panel is the enforcement point. Each region has its own network stack and state key (see the terraform apply step)."
+        description: "AWS region. Only ap-south-1 (Mumbai) is offered: me-central-1 (UAE) throttles every launch for this account. This input is now a fixed single choice, not an access gate. The state key no longer varies by region (see the terraform apply step)."
         type: choice
         options: [ap-south-1]
         default: ap-south-1
@@ -119,19 +119,12 @@ jobs:
         with:
           terraform_version: 1.15.7
 
-      # AZ_SUFFIX/AWS_AZ in one place, not repeated per region: see
-      # terraform/variables.tf for why the suffix is not always "a" (spot
-      # pricing varies by zone) - ap-south-1c and me-central-1a are each the
-      # measured cheapest zone in their region.
+      # One region, one zone: ap-south-1c (cheapest measured zone, and the
+      # only region this app uses since 2026-09-17).
       - name: Map region to its AZ suffix
         run: |
-          case "${{ inputs.region }}" in
-            ap-south-1) SUFFIX=c ;;
-            me-central-1) SUFFIX=a ;;
-            *) echo "::error::unknown region ${{ inputs.region }} - no AZ suffix mapping"; exit 1 ;;
-          esac
-          echo "AZ_SUFFIX=$SUFFIX" >> "$GITHUB_ENV"
-          echo "AWS_AZ=${{ inputs.region }}$SUFFIX" >> "$GITHUB_ENV"
+          echo "AZ_SUFFIX=c" >> "$GITHUB_ENV"
+          echo "AWS_AZ=ap-south-1c" >> "$GITHUB_ENV"
 
       - name: Cache Terraform providers
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -255,9 +248,6 @@ jobs:
           # at 30 min, so a lock older than an hour belongs to no live run.
           set -uo pipefail
           KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
-          if [ "${{ inputs.region }}" != "ap-south-1" ]; then
-            KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
-          fi
           BUCKET=ephemeral-desktop-643902831477-tfstate
           LOCK=$(aws s3 cp "s3://$BUCKET/$KEY.tflock" - --region me-central-1 2>/dev/null) || { echo "no lock on $KEY"; exit 0; }
           CREATED=$(echo "$LOCK" | jq -r '.Created // empty' 2>/dev/null || true)
@@ -293,14 +283,6 @@ jobs:
           KEY="desktop/terraform.tfstate"
           if [ -n "${{ inputs.guest_username }}" ]; then
             KEY="desktop/user-${{ inputs.guest_username }}/terraform.tfstate"
-            # ap-south-1 keeps the state key it always had, so every session
-            # already running there keeps working unchanged. Any other region
-            # gets its own key - it MUST, since it is a different, otherwise
-            # untracked, set of resources (see terraform/main.tf's per-region
-            # network remote state).
-            if [ "${{ inputs.region }}" != "ap-south-1" ]; then
-              KEY="desktop/user-${{ inputs.guest_username }}/${{ inputs.region }}/terraform.tfstate"
-            fi
           fi
           # -lock-timeout instead of failing instantly: the reaper, a manual
           # destroy and this apply can all target one username's state, and

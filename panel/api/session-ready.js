@@ -1,5 +1,5 @@
 import { bearerOk, HUB_CALLBACK_SECRET } from "../lib/auth.js";
-import { loadSessions, putSession, logEvent, getGuestLimitMinutes, clearHealth } from "../lib/state.js";
+import { loadSessions, putSession, logEvent, clearHealth } from "../lib/state.js";
 import { REGIONS, hashToken } from "../lib/desktops.js";
 
 // Called by desktop-up.yml once terraform apply succeeds. This deployment holds
@@ -23,13 +23,12 @@ export default async function handler(req, res) {
 
   const launchedAt = Number(req.body?.launched_at);
   const startedAt = Number.isFinite(launchedAt) && launchedAt > 0 ? launchedAt : Date.now() / 1000;
-  const isGuest = Boolean(prior.is_guest);
   // os was decided at dispatch from a verified session; the callback's value
   // is only a fallback for a session with no prior state (redeploy mid-run).
   const os = prior.os || (req.body?.os === "windows" ? "windows" : "linux");
-  // region was decided at dispatch from a verified admin session; the
-  // callback's value is only a fallback for a session with no prior state
-  // (redeploy mid-run), same as os above.
+  // region was decided at dispatch (now always ap-south-1); the callback's
+  // value is only a fallback for a session with no prior state (redeploy
+  // mid-run), same as os above.
   const region = prior.region || (REGIONS[req.body?.region] ? req.body.region : "ap-south-1");
   await putSession(username, {
     status: "ready", // the page polls the per-OS probe before calling it active
@@ -38,7 +37,6 @@ export default async function handler(req, res) {
     password: req.body?.password || null,
     login_user: req.body?.login_user || null,
     started_at: startedAt,
-    is_guest: isGuest,
     os,
     region,
     // What was actually launched: Linux falls back to on-demand when spot has
@@ -48,7 +46,6 @@ export default async function handler(req, res) {
     // Lets this machine report its own spot reclaim (api/session-lost.js).
     // Hashed: the raw token only ever exists on the machine.
     ...(req.body?.session_token ? { lost_token_hash: hashToken(req.body.session_token) } : {}),
-    ...(isGuest ? { expires_at: startedAt + (await getGuestLimitMinutes()) * 60 } : {}),
     // Cancelled while starting: the destroy waits behind this run in the
     // per-user concurrency group. Keep the mark so the page shows "Shutting
     // down" instead of offering Open on a machine that is about to go.

@@ -50,7 +50,10 @@ export async function sessionFromRequest(req) {
   if (!payload) return null;
   const admin = await isAdmin(payload.email);
   payload.is_admin = admin;
-  payload.can_persist = admin || (await isPermanentUser(payload.email));
+  // Guests removed 2026-09-17: access and persistence are the same thing now -
+  // everyone who may use the app keeps their files.
+  payload.has_access = admin || (await isPermanentUser(payload.email));
+  payload.can_persist = payload.has_access;
   return payload;
 }
 

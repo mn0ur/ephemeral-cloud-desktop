@@ -1,0 +1,155 @@
+name: Desktop - WAKE
+run-name: "Desktop - WAKE · ${{ inputs.guest_username }} · ${{ inputs.os }}"
+
+# Starts a machine that was stopped, repoints its hostname at the new public IP
+# (a stopped instance loses its address) and tells the panel it is ready.
+# Terraform is never run here: the machine already exists in its state file.
+on:
+  workflow_dispatch:
+    inputs:
+      guest_username:
+        description: "Whose machine to wake."
+        required: true
+      os:
+        description: "Which of that user's two machines."
+        type: choice
+        options: [linux, windows]
+        default: linux
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-lifecycle-${{ inputs.guest_username }}-${{ inputs.os }}
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    name: start the machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION: ap-south-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::AWS secrets are not set."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
+
+      - name: Start the machine, repoint DNS, tell the panel
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
+          CF_ZONE: sihaab.com
+        run: |
+          set -uo pipefail
+          USER_NAME="${{ inputs.guest_username }}"
+          OS="${{ inputs.os }}"
+
+          # Query per-INSTANCE, not per-reservation (Reservations[].Instances[]
+          # not Instances[0]): a duplicate/retried build could otherwise be
+          # silently collapsed to one ID here too. running/pending/stopping are
+          # included alongside stopped so an already-running machine (e.g. a
+          # double-click on Start) is found and treated as success below,
+          # rather than "no machine found".
+          IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Owner,Values=$USER_NAME" "Name=tag:OS,Values=$OS" \
+              "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=stopped,stopping,running,pending" \
+            --query 'Reservations[].Instances[].InstanceId' --output text)
+          if [ $? -ne 0 ]; then
+            echo "::error::describe-instances failed while looking up the $OS machine for $USER_NAME - aborting, nothing was touched"
+            exit 1
+          fi
+
+          COUNT=0
+          if [ -n "$IDS" ] && [ "$IDS" != "None" ]; then
+            COUNT=$(echo "$IDS" | wc -w)
+          fi
+
+          if [ "$COUNT" -eq 0 ]; then
+            # The machine is gone (AWS retirement, or deleted outside the panel).
+            # Say so plainly: the panel offers a rebuild rather than showing a
+            # wake that will never land.
+            echo "::error::no $OS machine found for $USER_NAME - it must be rebuilt"
+            exit 1
+          fi
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::$COUNT $OS instances matched Owner=$USER_NAME ($IDS) - refusing to guess which one to wake, this is an anomaly for a human to look at"
+            exit 1
+          fi
+
+          ID="$IDS"
+
+          if ! aws ec2 start-instances --instance-ids "$ID" >/dev/null; then
+            echo "::error::start-instances failed for $ID - aborting before DNS repoint or callback"
+            exit 1
+          fi
+          if ! aws ec2 wait instance-running --instance-ids "$ID"; then
+            echo "::error::start did not confirm running for $ID within the wait - aborting before DNS repoint or callback"
+            exit 1
+          fi
+
+          IP=$(aws ec2 describe-instances --instance-ids "$ID" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          if [ $? -ne 0 ]; then
+            echo "::error::describe-instances failed while fetching the public IP for $ID - aborting before DNS repoint or callback"
+            exit 1
+          fi
+          LAUNCHED_AT=$(date -u +%s)
+          if [ -z "$IP" ] || [ "$IP" = "None" ]; then
+            echo "::error::machine $ID started but has no public IP"
+            exit 1
+          fi
+
+          HOST="$USER_NAME.desktop.sihaab.com"
+          [ "$OS" = "windows" ] && HOST="$USER_NAME-desktop.sihaab.com"
+          if ! bash scripts/set-dns.sh "$HOST" "$IP" "$CF_ZONE" false; then
+            echo "::error::DNS repoint failed for $HOST - the machine IS running but the hostname does not point at it; aborting before callback"
+            exit 1
+          fi
+
+          # The password lives on the user's data volume as a tag and does not
+          # change when a machine sleeps, so the panel already has it from the
+          # build. A wake sends no password; session-ready keeps the prior one.
+          if [ -z "$HUB_CALLBACK_SECRET" ]; then
+            echo "::error::HUB_CALLBACK_SECRET is not set - the panel cannot learn the desktop is awake."
+            exit 1
+          fi
+          PAYLOAD=$(jq -n \
+            --arg username "$USER_NAME" \
+            --arg url "https://$HOST" \
+            --arg os "$OS" \
+            --arg region "ap-south-1" \
+            --arg instance_id "$ID" \
+            --arg launched_at "$LAUNCHED_AT" \
+            '{username:$username, url:$url, os:$os, region:$region, instance_id:$instance_id, launched_at:($launched_at|tonumber), market:"on-demand", woken:true}')
+          if ! curl -fsS -X POST "$PANEL_URL/api/session-ready" \
+            -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"; then
+            echo "::error::callback to $PANEL_URL/api/session-ready failed - the machine IS running but the panel was not told; it will not show as ready until the next probe"
+            exit 1
+          fi
+
+          {
+            echo "## Desktop woken"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| User | \`$USER_NAME\` |"
+            echo "| OS | \`$OS\` |"
+            echo "| Instance | \`$ID\` |"
+            echo "| Address | https://$HOST |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,90 @@
+name: Desktop - SLEEP
+# One label per user and OS: the panel shows a user ONLY their own run and
+# matches on this name (panel/lib/desktops.js runBelongsTo).
+run-name: "Desktop - SLEEP · ${{ inputs.guest_username }} · ${{ inputs.os }}"
+
+# Stops the machine; it is NOT destroyed. The root disk, installed apps and
+# settings all survive, which is the whole point: the next Start is a ~1 minute
+# wake instead of a ~3 minute build. Terraform is never run here - the machine
+# stays in its state file exactly as it is.
+on:
+  workflow_dispatch:
+    inputs:
+      guest_username:
+        description: "Whose machine to put to sleep."
+        required: true
+      os:
+        description: "Which of that user's two machines."
+        type: choice
+        options: [linux, windows]
+        default: linux
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-lifecycle-${{ inputs.guest_username }}-${{ inputs.os }}
+  cancel-in-progress: false
+
+jobs:
+  sleep:
+    name: stop the machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AWS_REGION: ap-south-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "::error::AWS secrets are not set."
+            exit 1
+          fi
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> "$GITHUB_ENV"
+          echo "AWS_DEFAULT_REGION=$AWS_REGION" >> "$GITHUB_ENV"
+
+      - name: Stop the machine and park its hostname
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          HUB_CALLBACK_SECRET: ${{ secrets.HUB_CALLBACK_SECRET }}
+          PANEL_URL: ${{ vars.PANEL_URL || 'https://desktop.sihaab.com' }}
+          CF_ZONE: sihaab.com
+        run: |
+          set -uo pipefail
+          USER_NAME="${{ inputs.guest_username }}"
+          OS="${{ inputs.os }}"
+
+          # Find this user's machine by tag. Owner+OS is unique: one machine per
+          # user per OS (panel/lib/machines.js).
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Owner,Values=$USER_NAME" "Name=tag:OS,Values=$OS" \
+              "Name=tag:Stack,Values=desktop" "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+            --query 'Reservations[].Instances[0].InstanceId' --output text 2>/dev/null || true)
+          if [ -z "$ID" ] || [ "$ID" = "None" ]; then
+            echo "::warning::no $OS machine found for $USER_NAME - nothing to stop"
+          else
+            echo "stopping $ID"
+            aws ec2 stop-instances --instance-ids "$ID" >/dev/null
+            aws ec2 wait instance-stopped --instance-ids "$ID" || echo "::warning::stop did not confirm within the wait; the panel is told anyway"
+          fi
+
+          # Park the hostname on an unroutable address while the machine sleeps,
+          # so the name never points at whatever takes that IP next.
+          HOST="$USER_NAME.desktop.sihaab.com"
+          [ "$OS" = "windows" ] && HOST="$USER_NAME-desktop.sihaab.com"
+          bash scripts/set-dns.sh "$HOST" 192.0.2.1 "$CF_ZONE" false || echo "::warning::DNS park failed for $HOST"
+
+          if [ -n "$HUB_CALLBACK_SECRET" ]; then
+            curl -fsS -X POST "$PANEL_URL/api/session-slept" \
+              -H "Authorization: Bearer $HUB_CALLBACK_SECRET" \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"$USER_NAME\",\"os\":\"$OS\"}" \
+              || echo "::warning::callback failed - the machine IS stopped; the panel will catch up on its next probe"
+          fi

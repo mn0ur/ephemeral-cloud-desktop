@@ -97,12 +97,30 @@ jobs:
               continue
             fi
             echo "$AWS_REGION/$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
-            # Refuse while attached: deleting under a running desktop corrupts
-            # whatever is mid-write, and AWS rejects it anyway. Record it and
-            # keep going rather than failing right away, so the callback below
-            # still runs for a successful delete before this job exits 1.
+            # A sleeping machine is STOPPED but keeps its data volume attached
+            # (Plan B, Task 3) - that is normal, not a live desktop mid-write.
+            # If the instance holding this volume is stopped, detach it here
+            # and proceed with the delete. Still refuse whenever the attached
+            # instance is running/pending (or its state can't be read): deleting
+            # a volume out from under a live desktop must stay impossible.
+            INSTANCE_STATE=""
+            if [ "$STATE" != "available" ] && [ -n "$ATTACHED" ] && [ "$ATTACHED" != "None" ]; then
+              INSTANCE_STATE=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$ATTACHED" \
+                --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || true)
+              if [ "$INSTANCE_STATE" = "stopped" ]; then
+                echo "$VOL is attached to stopped instance $ATTACHED (sleeping) - detaching before delete"
+                aws ec2 detach-volume --region "$AWS_REGION" --volume-id "$VOL"
+                aws ec2 wait volume-available --region "$AWS_REGION" --volume-ids "$VOL"
+                STATE=available
+              fi
+            fi
+            # Refuse while still attached: deleting under a running desktop
+            # corrupts whatever is mid-write, and AWS rejects it anyway.
+            # Record it and keep going rather than failing right away, so the
+            # callback below still runs for a successful delete before this
+            # job exits 1.
             if [ "$STATE" != "available" ]; then
-              echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
+              echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}, instance state ${INSTANCE_STATE:-unknown}). Destroy the desktop first."
               BLOCKED="$BLOCKED $AWS_REGION/$ROLE:$VOL"
               continue
             fi
@@ -212,12 +230,30 @@ jobs:
               continue
             fi
             echo "$AWS_REGION/$ROLE: $VOL state=$STATE attached_to=$ATTACHED"
-            # Refuse while attached: deleting under a running desktop corrupts
-            # whatever is mid-write, and AWS rejects it anyway. Record it and
-            # keep going rather than failing right away, so the callback below
-            # still runs for a successful delete before this job exits 1.
+            # A sleeping machine is STOPPED but keeps its data volume attached
+            # (Plan B, Task 3) - that is normal, not a live desktop mid-write.
+            # If the instance holding this volume is stopped, detach it here
+            # and proceed with the delete. Still refuse whenever the attached
+            # instance is running/pending (or its state can't be read): deleting
+            # a volume out from under a live desktop must stay impossible.
+            INSTANCE_STATE=""
+            if [ "$STATE" != "available" ] && [ -n "$ATTACHED" ] && [ "$ATTACHED" != "None" ]; then
+              INSTANCE_STATE=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$ATTACHED" \
+                --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || true)
+              if [ "$INSTANCE_STATE" = "stopped" ]; then
+                echo "$VOL is attached to stopped instance $ATTACHED (sleeping) - detaching before delete"
+                aws ec2 detach-volume --region "$AWS_REGION" --volume-id "$VOL"
+                aws ec2 wait volume-available --region "$AWS_REGION" --volume-ids "$VOL"
+                STATE=available
+              fi
+            fi
+            # Refuse while still attached: deleting under a running desktop
+            # corrupts whatever is mid-write, and AWS rejects it anyway.
+            # Record it and keep going rather than failing right away, so the
+            # callback below still runs for a successful delete before this
+            # job exits 1.
             if [ "$STATE" != "available" ]; then
-              echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}). Destroy the desktop first."
+              echo "::error::Volume $VOL in $AWS_REGION is '$STATE' (attached to ${ATTACHED:-unknown}, instance state ${INSTANCE_STATE:-unknown}). Destroy the desktop first."
               BLOCKED="$BLOCKED $AWS_REGION/$ROLE:$VOL"
               continue
             fi

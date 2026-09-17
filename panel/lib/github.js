@@ -19,6 +19,9 @@ export const WORKFLOWS = {
   // Deletes a user's saved data volume. Separate from destroy on purpose:
   // destroy ends a session and KEEPS the data, this throws the data away.
   wipe: "desktop-wipe.yml",
+  // Stops a machine without destroying it (Plan B). Its opposite is wake.
+  sleep: "desktop-sleep.yml",
+  wake: "desktop-wake.yml",
 };
 
 async function gh(path, options = {}) {
